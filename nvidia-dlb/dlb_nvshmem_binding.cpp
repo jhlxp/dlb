@@ -13,6 +13,7 @@
 #include <cstring>
 #include <limits>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -49,6 +50,9 @@ at::Tensor dlb_cuda_module_probe(int64_t device) {
                              at::TensorOptions().dtype(at::kLong));
 }
 
+// Owns the persistent topology, buffers, and communication state of one rank.
+// Each rank has its own instance and collects only source-server-local demand;
+// no instance stores a cluster-wide demand matrix or global schedule.
 struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
     std::uint32_t rank;
     std::uint32_t world;
@@ -56,11 +60,28 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
     std::uint32_t device;
     std::uint32_t server;
     std::uint32_t local_rank;
+    // Remains invalid until the server-local NVSHMEM team is created successfully.
     nvshmem_team_t local_team = NVSHMEM_TEAM_INVALID;
     dlb_alltoall::DlbRuntime runtime{};
     bool initialized = false;
     bool closed = false;
+    // `last_dispatch_epoch` orders every completed DLB communication phase
+    // (dispatch or combine). The submitted/finished pair separately tracks
+    // the one dispatch that may be posted without being materialized yet.
     std::uint64_t last_dispatch_epoch = 0;
+    std::uint64_t submitted_dispatch_epoch = 0;
+    std::uint64_t finished_dispatch_epoch = 0;
+    bool dispatch_pending = false;
+    at::Tensor pending_dispatch_x;
+    at::Tensor pending_dispatch_topk_idx;
+    at::Tensor pending_dispatch_topk_weights;
+    std::uint32_t pending_dispatch_num_experts = 0;
+    std::int64_t pending_dispatch_expert_alignment = 0;
+    // The runtime's repair-ready event protects the writer. This additional
+    // event protects the final scatter reader before a later dispatch reuses
+    // the same repair slot from another CUDA stream.
+    cudaEvent_t dispatch_materialize_ready = nullptr;
+    bool dispatch_materialize_ready_recorded = false;
     std::uint64_t* symmetric_demand_row = nullptr;
     std::uint64_t* symmetric_demand_matrix = nullptr;
     std::uint64_t* device_destination_cursors = nullptr;
@@ -73,6 +94,7 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
     int last_profile_kind = 0;  // 0: none/read, 1: dispatch, 2: combine
     std::uint64_t last_profile_epoch = 0;
 
+    // Validates the runtime configuration and initializes rank-local resources.
     dlb_nvshmem_comm_t(int64_t rank_value, int64_t rails_value, int64_t world_value,
                         int64_t device_value, at::Tensor uid,
                         int64_t record_bytes_value,
@@ -109,6 +131,7 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
         TORCH_CHECK(uid.device().is_cpu() && uid.scalar_type() == at::kByte &&
                         uid.numel() == sizeof(nvshmemx_uniqueid_t),
                     "uid must be a CPU NVSHMEM unique-id byte tensor");
+        // Map the global rank to its logical server and Rail endpoint.
         server = rank / rails;
         local_rank = rank % rails;
         check_cuda(cudaSetDevice(device), "selecting DLB CUDA device");
@@ -119,19 +142,23 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
                    "querying DLB CUDA SM count");
         TORCH_CHECK(num_comm_sms_value <= device_sm_count,
                     "num_comm_sms exceeds the CUDA device SM count");
+        // Pair one sender CTA with one receiver CTA for every Rail channel.
         const std::uint32_t rail_channel_count =
             static_cast<std::uint32_t>(num_comm_sms_value / 2);
 
+        // Join all EP ranks into one NVSHMEM world using the broadcast unique ID.
         nvshmemx_uniqueid_t id;
         std::memcpy(&id, uid.data_ptr(), sizeof(id));
         nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
         nvshmemx_set_attr_uniqueid_args(rank, world, &id, &attr);
         TORCH_CHECK(nvshmemx_init_attr(NVSHMEMX_INIT_WITH_UNIQUEID, &attr) == NVSHMEMX_SUCCESS,
                     "initializing DLB NVSHMEM runtime failed");
+        // Group the contiguous ranks of this logical server for local demand collection.
         TORCH_CHECK(nvshmem_team_split_strided(NVSHMEM_TEAM_WORLD, server * rails, 1, rails,
                                                 nullptr, 0, &local_team) == NVSHMEMX_SUCCESS,
                     "creating DLB local NVSHMEM team failed");
 
+        // Freeze the validated topology, capacities, and backend policy for the runtime.
         const dlb_alltoall::DlbRuntimeConfig config = {
             rank, world, rails,
             static_cast<std::uint64_t>(record_bytes_value),
@@ -146,6 +173,7 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
             use_loopback_transport_value,
             local_team,
         };
+        // Allocate the persistent transport resources owned by this rank.
         check_cuda(dlb_alltoall::initialize_dlb_nvshmem_rdma_runtime(&runtime, config),
                    "initializing DLB NVSHMEM/RDMA backend");
         symmetric_demand_row = static_cast<std::uint64_t*>(
@@ -176,6 +204,9 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
         check_cuda(cudaHostAlloc(reinterpret_cast<void**>(&host_invalid_route_count),
                                  sizeof(std::uint64_t), cudaHostAllocPortable),
                    "allocating DLB pinned invalid-route counter");
+        check_cuda(cudaEventCreateWithFlags(&dispatch_materialize_ready,
+                                            cudaEventDisableTiming),
+                   "creating DLB dispatch materialization event");
         const std::size_t transfer_count =
             remote_servers * rails * rail_channel_count;
         TORCH_CHECK(transfer_count <= std::numeric_limits<std::uint32_t>::max(),
@@ -230,6 +261,12 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
                     "MoE route count overflows uint64_t");
     }
 
+    // Converts local MoE routing decisions into transport-ready DLB records.
+    //
+    // This method reuses the pipeline slot selected by epoch, collects the
+    // server-local demand tile, builds a Rail-balanced device plan, and packs
+    // rank-deduplicated records directly into the selected transport buffers.
+    // All work is enqueued on caller_stream without a host-side synchronization.
     void prepare_moe_direct(at::Tensor x, at::Tensor topk_idx,
                             at::Tensor topk_weights, std::uint64_t epoch,
                             std::uint32_t round_id, std::uint32_t num_experts,
@@ -258,6 +295,8 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
         check_cuda(cudaMemsetAsync(device_invalid_route_count, 0,
                                    sizeof(std::uint64_t), caller_stream),
                    "clearing DLB invalid-route counter");
+        // Build this rank's demand row, then concatenate all rows from the
+        // server-local NVSHMEM team into the M-by-world demand matrix.
         check_cuda(dlb_alltoall::launch_dlb_count_moe_routes(
                        topk_idx.data_ptr<std::int64_t>(), route_count,
                        static_cast<std::uint32_t>(topk_idx.size(1)), num_experts,
@@ -290,6 +329,8 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
         const std::uint64_t repair_epoch_offset =
             static_cast<std::uint64_t>(slot) * world *
             runtime.config.repair_slot_bytes;
+        // The device pointer table exposes every local Rail's symmetric send
+        // slot, allowing this source GPU to stage directly to selected_rail.
         check_cuda(dlb_alltoall::launch_dlb_pack_moe_direct(
                        x.data_ptr(), static_cast<std::uint64_t>(x.size(0)),
                        hidden_bytes, topk_idx.data_ptr<std::int64_t>(),
@@ -340,16 +381,34 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
         return result;
     }
 
-    std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor,
-               at::Tensor, at::Tensor, at::Tensor, at::Tensor,
-               at::Tensor> dispatch_moe(
+    // Posts the asynchronous transport portion of one MoE dispatch.
+    //
+    // Args:
+    //   x: Contiguous [tokens, hidden] CUDA payload tensor.
+    //   topk_idx: Contiguous [tokens, topk] CUDA expert IDs.
+    //   topk_weights: Contiguous [tokens, topk] CUDA router weights.
+    //   epoch_value: Globally ordered communication epoch for this dispatch.
+    //   round_id_value: Deterministic Rail-balancing rotation identifier.
+    //   num_experts_value: Total expert count across all DLB ranks.
+    //   expert_alignment_value: Output alignment retained for finish_dispatch_moe.
+    //
+    // This method validates, plans, packs, and launches transport without
+    // waiting for inbound repair or materializing expert-major outputs. Only
+    // one posted dispatch may exist at a time because its metadata and repair
+    // buffer are owned by this communicator instance until it is finished.
+    void post_dispatch_moe(
         at::Tensor x, at::Tensor topk_idx, at::Tensor topk_weights,
         int64_t epoch_value, int64_t round_id_value, int64_t num_experts_value,
         int64_t expert_alignment_value) {
         TORCH_CHECK(!closed && initialized, "DLB communicator is closed");
+        TORCH_CHECK(!dispatch_pending,
+                    "DLB permits only one outstanding dispatch; call "
+                    "finish_dispatch_moe before posting another dispatch");
         TORCH_CHECK(epoch_value > 0 &&
                         static_cast<std::uint64_t>(epoch_value) == last_dispatch_epoch + 1,
                     "DLB dispatch epochs must start at 1 and increase by one");
+        TORCH_CHECK(static_cast<std::uint64_t>(epoch_value) > submitted_dispatch_epoch,
+                    "DLB dispatch epoch must exceed the previously submitted epoch");
         TORCH_CHECK(round_id_value >= 0 &&
                         round_id_value <= std::numeric_limits<std::uint32_t>::max(),
                     "round_id must fit uint32_t");
@@ -369,18 +428,59 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
                                        caller_stream),
                        "recording DLB dispatch profile start");
         }
+        // A prior finish may have enqueued scatter on another caller stream.
+        // Do not overwrite its repair slot until that reader has completed.
+        if (dispatch_materialize_ready_recorded) {
+            check_cuda(cudaStreamWaitEvent(caller_stream, dispatch_materialize_ready, 0),
+                       "waiting for prior DLB dispatch materialization");
+        }
         prepare_moe_direct(
             x, topk_idx, topk_weights, epoch,
             static_cast<std::uint32_t>(round_id_value),
             static_cast<std::uint32_t>(num_experts_value), caller_stream);
+        check_cuda(dlb_alltoall::launch_dlb_nvshmem_rdma(
+                       &runtime, epoch, caller_stream),
+                   "launching fused DLB dispatch");
 
+        // Keep source storage alive until finish has established that repair is
+        // complete. This permits callers to release inputs after posting.
+        pending_dispatch_x = std::move(x);
+        pending_dispatch_topk_idx = std::move(topk_idx);
+        pending_dispatch_topk_weights = std::move(topk_weights);
+        pending_dispatch_num_experts = static_cast<std::uint32_t>(num_experts_value);
+        pending_dispatch_expert_alignment = expert_alignment_value;
+        submitted_dispatch_epoch = epoch;
+        dispatch_pending = true;
+    }
+
+    // Materializes a previously posted dispatch after inbound repair is ready.
+    //
+    // This helper contains only the finish phase. Source preparation and the
+    // asynchronous transport launch are performed by post_dispatch_moe.
+    std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+               at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+               at::Tensor> materialize_posted_dispatch(
+        at::Tensor x, int64_t epoch_value, int64_t num_experts_value,
+        int64_t expert_alignment_value) {
+        TORCH_CHECK(!closed && initialized, "DLB communicator is closed");
+        TORCH_CHECK(dispatch_pending,
+                    "DLB materialization requires a posted dispatch");
+        TORCH_CHECK(epoch_value > 0 &&
+                        static_cast<std::uint64_t>(epoch_value) == submitted_dispatch_epoch,
+                    "DLB materialization epoch does not match the posted dispatch");
+        TORCH_CHECK(num_experts_value == pending_dispatch_num_experts &&
+                        expert_alignment_value == pending_dispatch_expert_alignment,
+                    "DLB materialization metadata does not match the posted dispatch");
+        check_cuda(cudaSetDevice(device), "selecting DLB dispatch device");
+        const cudaStream_t caller_stream =
+            at::cuda::getCurrentCUDAStream(device).stream();
+        const std::uint64_t epoch = static_cast<std::uint64_t>(epoch_value);
+        const std::uint32_t profile_slot = static_cast<std::uint32_t>(
+            epoch % runtime.config.pipeline_depth);
         std::uint8_t* repair =
             dlb_alltoall::dlb_nvshmem_repair_buffer_for_epoch(&runtime, epoch);
         const std::size_t output_bytes =
             static_cast<std::size_t>(world) * runtime.config.repair_slot_bytes;
-        check_cuda(dlb_alltoall::launch_dlb_nvshmem_rdma(
-                       &runtime, epoch, caller_stream),
-                   "launching fused DLB dispatch");
         check_cuda(dlb_alltoall::wait_dlb_nvshmem_rdma_epoch(
                        &runtime, epoch, caller_stream),
                    "waiting for fused DLB dispatch");
@@ -545,11 +645,46 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
         at::Tensor aligned_counts_cpu = at::empty_like(actual_counts_cpu);
         std::memcpy(aligned_counts_cpu.data_ptr(), aligned_counts.data(),
                     aligned_counts.size() * sizeof(aligned_counts.front()));
+        // Record after scatter so a later post on any CUDA stream cannot
+        // overwrite this epoch's repair slot while scatter still reads it.
+        check_cuda(cudaEventRecord(dispatch_materialize_ready, caller_stream),
+                   "recording DLB dispatch materialization completion");
+        dispatch_materialize_ready_recorded = true;
+        finished_dispatch_epoch = epoch;
+        dispatch_pending = false;
+        pending_dispatch_x = at::Tensor();
+        pending_dispatch_topk_idx = at::Tensor();
+        pending_dispatch_topk_weights = at::Tensor();
+        pending_dispatch_num_experts = 0;
+        pending_dispatch_expert_alignment = 0;
         last_dispatch_epoch = epoch;
         return std::make_tuple(recv_x, recv_headers, recv_weights, valid_mask,
                                actual_counts_cpu, aligned_counts_cpu,
                                rail_counts_cpu, channel_counts_cpu,
                                group_output_indices);
+    }
+
+    // Finishes a specific posted dispatch and returns expert-major local inputs.
+    //
+    // Args:
+    //   epoch_value: The epoch passed to post_dispatch_moe.
+    //
+    // Returns:
+    //   Nine tensors containing expert-major inputs, routing metadata, and
+    //   Rail/channel accounting for the posted epoch.
+    std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+               at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+               at::Tensor> finish_dispatch_moe(int64_t epoch_value) {
+        TORCH_CHECK(!closed && initialized, "DLB communicator is closed");
+        TORCH_CHECK(dispatch_pending,
+                    "DLB finish_dispatch_moe requires a posted dispatch");
+        TORCH_CHECK(epoch_value > 0 &&
+                        static_cast<std::uint64_t>(epoch_value) == submitted_dispatch_epoch,
+                    "DLB finish_dispatch_moe epoch does not match the posted dispatch");
+        return materialize_posted_dispatch(
+            pending_dispatch_x, epoch_value,
+            static_cast<int64_t>(pending_dispatch_num_experts),
+            pending_dispatch_expert_alignment);
     }
 
     at::Tensor get_last_dispatch_profile() {
@@ -597,6 +732,8 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
         int64_t num_tokens_value, int64_t num_topk_value,
         bool apply_router_weights) {
         TORCH_CHECK(!closed && initialized, "DLB communicator is closed");
+        TORCH_CHECK(!dispatch_pending,
+                    "finish_dispatch_moe must complete before combine_moe");
         last_profile_kind = 0;
         TORCH_CHECK(epoch_value > 0 &&
                         static_cast<std::uint64_t>(epoch_value) ==
@@ -768,6 +905,8 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
 
     void close() {
         if (closed) return;
+        TORCH_CHECK(!dispatch_pending,
+                    "finish_dispatch_moe must complete before closing DLB communicator");
         if (initialized) {
             check_cuda(cudaSetDevice(device), "selecting DLB CUDA device for close");
             check_cuda(dlb_alltoall::destroy_dlb_nvshmem_rdma_runtime(&runtime),
@@ -813,6 +952,12 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
                        "releasing DLB pinned invalid-route counter");
             host_invalid_route_count = nullptr;
         }
+        if (dispatch_materialize_ready != nullptr) {
+            check_cuda(cudaEventDestroy(dispatch_materialize_ready),
+                       "destroying DLB dispatch materialization event");
+            dispatch_materialize_ready = nullptr;
+            dispatch_materialize_ready_recorded = false;
+        }
         if (local_team != NVSHMEM_TEAM_INVALID) {
             nvshmem_team_destroy(local_team);
             local_team = NVSHMEM_TEAM_INVALID;
@@ -830,6 +975,7 @@ struct dlb_nvshmem_comm_t : torch::CustomClassHolder {
 
 }  // namespace
 
+// Expose the stateful DLB communicator through the Torch custom-class registry.
 TORCH_LIBRARY(dlb_classes, m) {
     m.class_<dlb_nvshmem_comm_t>("nvshmem_comm_t")
         .def(torch::init<int64_t, int64_t, int64_t, int64_t, at::Tensor,
@@ -838,7 +984,8 @@ TORCH_LIBRARY(dlb_classes, m) {
                          bool, bool>())
         .def("benchmark_prepare_moe_device",
              &dlb_nvshmem_comm_t::benchmark_prepare_moe_device)
-        .def("dispatch_moe", &dlb_nvshmem_comm_t::dispatch_moe)
+        .def("post_dispatch_moe", &dlb_nvshmem_comm_t::post_dispatch_moe)
+        .def("finish_dispatch_moe", &dlb_nvshmem_comm_t::finish_dispatch_moe)
         .def("get_last_dispatch_profile",
              &dlb_nvshmem_comm_t::get_last_dispatch_profile)
         .def("get_last_combine_profile",
@@ -847,6 +994,7 @@ TORCH_LIBRARY(dlb_classes, m) {
         .def("close", &dlb_nvshmem_comm_t::close);
 }
 
+// Expose stateless bootstrap and diagnostic operations through Torch operators.
 TORCH_LIBRARY(dlb_nvshmem, m) {
     m.def("get_uniqueid", &get_dlb_nvshmem_init_id);
     m.def("cuda_module_probe", &dlb_cuda_module_probe);

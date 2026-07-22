@@ -44,7 +44,7 @@ expert_y = local_expert_forward(
 
 要求是保持输出行与输入 record 行对应。expert 内不必按 source token 排序。
 
-生产部署中，该接口连接 grouped GEMM 或专家 MLP runtime。DLB 提供 expert 连续分段、计数、padding mask 和回程 metadata，不约束专家 kernel 实现。
+生产部署中，该接口连接 grouped GEMM 或专家 MLP runtime。DLB 提供 expert 连续分段、计数、padding mask 和回程 metadata，不约束专家 kernel 实现。`ticket.finish()` 返回的 `EventOverlap` 是读取 `recv_x` 的 CUDA 依赖；host 已从小型 count D2H 得到分段长度，不代表 scatter 已同步完成。
 
 ## 3. Header 与返回寻址
 
@@ -122,6 +122,8 @@ returned_weight[token, each_topk_slot] = each_topk_weight
 
 group 内局部求和和 source 端跨目标 Rank 累加都使用 FP32。所有 records 完成后再统一 cast 回 activation dtype，减少逐次 BF16 累加误差。
 
+`DLBBuffer.combine(..., apply_router_weights=True)` 默认在 expert rank 内执行这一步 router-weighted 局部求和。若显式设为 `False`，payload 改为未加权局部和；header 中传给本次 `combine()` 的 weight 仍会回填到返回的 `combined_weights`，调用方可在外部实现自己的加权规则。
+
 ## 8. FP32 atomic accumulation
 
 一个 token 的 `topk` 条专家结果会先在各目标 Rank 内局部聚合，但不同目标 Rank 的 grouped results 仍可能经过不同 Rails/transfers，返回先后不确定：
@@ -168,3 +170,5 @@ token t <- rank 1 的本地 expert 加权和
 - combine 前不能提前复用仍属于该 pipeline epoch 的业务 buffer。
 
 `DLBHandle` 保存该批 expert records 的回程路由状态，以及 `dispatch_group_output_indices`，用它把 expert-expanded 输出重新归并到 rank-deduplicated return records。
+
+最后一条是业务契约，也是当前实现仍需由调用方遵守的边界：`combine()` 校验 `num_experts`、Top-K shape、device、dtype 和 tensor shape，但 handle 中尚未编码 communicator identity/epoch 并做完整 fail-fast 检查。生产封装层应把 handle 视为不可跨 batch、不可跨 `DLBBuffer` 的线性资源。

@@ -50,7 +50,8 @@ def run() -> None:
 
     failed_as_expected = 0
     try:
-        _, _, _, _, event = buffer.dispatch(x, topk_idx, topk_weights)
+        ticket = buffer.post_dispatch(x, topk_idx, topk_weights)
+        _, _, _, _, event = ticket.finish()
         event.synchronize()
     except RuntimeError as error:
         if "expert IDs outside" not in str(error):

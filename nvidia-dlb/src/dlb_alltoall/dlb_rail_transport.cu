@@ -331,6 +331,7 @@ cudaError_t launch_dlb_internode_rail(
         &receive_slot_bytes,
         &chunk_bytes,
     };
+    // Launch one 640-thread CTA for every logical Rail channel.
     const dim3 block(kCommThreadsPerBlock);
     const dim3 grid(channel_count);
     return launch_1d(grid, block, reinterpret_cast<const void*>(dlb_internode_rail_kernel), args, stream);

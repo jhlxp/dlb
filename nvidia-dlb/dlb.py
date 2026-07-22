@@ -88,7 +88,7 @@ class EventOverlap:
 
 @dataclass
 class DLBHandle:
-    """Routing state produced by :meth:`DLBBuffer.dispatch`.
+    """Routing state produced by :meth:`DLBDispatchTicket.finish`.
 
     The received metadata is kept in the same expert-expanded, padded order as
     ``recv_x``.  ``combine`` uses it to return every expert result to the
@@ -113,6 +113,30 @@ class DLBHandle:
     dispatch_group_output_indices: torch.Tensor
     dispatch_rail_traffic_records: torch.Tensor
     dispatch_channel_traffic_records: torch.Tensor
+
+
+@dataclass
+class DLBDispatchTicket:
+    """Owns one DLB dispatch that has been posted but not materialized.
+
+    A posted dispatch has already planned, packed, and launched transport on
+    the communication streams.  Its receive layout is unavailable until
+    :meth:`finish` waits for transport and materializes the expert-major
+    tensors.  The ticket keeps routing inputs alive for all asynchronous GPU
+    work issued during the post phase.
+    """
+
+    _buffer: "DLBBuffer"
+    _x: torch.Tensor
+    _topk_idx: torch.Tensor
+    _topk_weights: torch.Tensor
+    _epoch: int
+    _expert_alignment: int
+    _finished: bool = False
+
+    def finish(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DLBHandle, EventOverlap]:
+        """Waits for transport and returns the normal DLB dispatch result."""
+        return self._buffer._finish_posted_dispatch(self)
 
 
 class DLBBuffer:
@@ -190,6 +214,7 @@ class DLBBuffer:
         self.closed = False
         self._epoch = 0
         self._round_id = 0
+        self._pending_dispatch: Optional[DLBDispatchTicket] = None
         self.size_hint = self.get_buffer_size_hint(
             self.world_size,
             self.gpus_per_server,
@@ -271,53 +296,15 @@ class DLBBuffer:
         if self.closed:
             raise RuntimeError("DLBBuffer is closed")
 
-    def _next_epoch(self) -> int:
-        self._epoch += 1
-        return self._epoch
-
-    def _communicate_moe(
+    def _prepare_dispatch_inputs(
         self,
         x: torch.Tensor,
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
+        topk_idx: Optional[torch.Tensor],
+        topk_weights: Optional[torch.Tensor],
+        handle: Optional[DLBHandle],
         expert_alignment: int,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
-        """Run the production fused routing/count/plan/pack entry point."""
-        epoch = self._next_epoch()
-        result = self._comm.dispatch_moe(
-            x,
-            topk_idx,
-            topk_weights,
-            epoch,
-            self._round_id,
-            self.num_experts,
-            expert_alignment,
-        )
-        self._round_id += 1
-        return result
-
-    def dispatch(
-        self,
-        x: torch.Tensor,
-        topk_idx: Optional[torch.Tensor] = None,
-        topk_weights: Optional[torch.Tensor] = None,
-        *,
-        expert_alignment: int = 1,
-        handle: Optional[DLBHandle] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DLBHandle, EventOverlap]:
-        """Route tokens to local experts and return an expert-expanded layout."""
-        self._check_open()
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Validates and normalizes one public MoE routing request."""
         if x.dim() != 2 or x.shape[1] != self.hidden or x.shape[0] > self.num_max_tokens_per_rank:
             raise ValueError(
                 f"x must have shape [T, {self.hidden}] with T <= {self.num_max_tokens_per_rank}"
@@ -341,9 +328,57 @@ class DLBBuffer:
             topk_weights = torch.ones_like(topk_idx, dtype=torch.float32)
         if topk_weights.shape != topk_idx.shape or not topk_weights.is_cuda:
             raise ValueError("topk_weights must be a CUDA tensor with the same shape as topk_idx")
-        topk_weights = topk_weights.to(torch.float32).contiguous()
+        return x, topk_idx, topk_weights.to(torch.float32).contiguous()
 
-        num_tokens = x.shape[0]
+    def post_dispatch(
+        self,
+        x: torch.Tensor,
+        topk_idx: Optional[torch.Tensor] = None,
+        topk_weights: Optional[torch.Tensor] = None,
+        *,
+        expert_alignment: int = 1,
+        handle: Optional[DLBHandle] = None,
+    ) -> DLBDispatchTicket:
+        """Posts DLB routing and transport without waiting for received inputs.
+
+        The application may run work that does not consume this dispatch's
+        expert inputs before calling :meth:`DLBDispatchTicket.finish`.  One
+        outstanding post is allowed per buffer because it owns the current
+        transport and repair slots.
+        """
+        self._check_open()
+        if self._pending_dispatch is not None:
+            raise RuntimeError("finish the outstanding DLB dispatch before posting another one")
+        x, topk_idx, topk_weights = self._prepare_dispatch_inputs(
+            x, topk_idx, topk_weights, handle, expert_alignment
+        )
+        epoch = self._epoch + 1
+        self._comm.post_dispatch_moe(
+            x,
+            topk_idx,
+            topk_weights,
+            epoch,
+            self._round_id,
+            self.num_experts,
+            expert_alignment,
+        )
+        self._epoch = epoch
+        self._round_id += 1
+        ticket = DLBDispatchTicket(
+            self, x, topk_idx, topk_weights, epoch, expert_alignment
+        )
+        self._pending_dispatch = ticket
+        return ticket
+
+    def _finish_posted_dispatch(
+        self, ticket: DLBDispatchTicket
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DLBHandle, EventOverlap]:
+        """Materializes the expert inputs associated with one posted ticket."""
+        self._check_open()
+        if ticket._buffer is not self or ticket is not self._pending_dispatch:
+            raise RuntimeError("the DLB dispatch ticket does not belong to this active buffer")
+        if ticket._finished:
+            raise RuntimeError("the DLB dispatch ticket has already been finished")
         (
             recv_x,
             headers,
@@ -354,33 +389,23 @@ class DLBBuffer:
             rail_traffic,
             channel_traffic,
             group_output_indices,
-        ) = self._communicate_moe(
-            x, topk_idx, topk_weights, expert_alignment
-        )
-        recv_source_rank = headers[:, 1]
-        recv_source_token = headers[:, 2]
-        recv_expert_idx = headers[:, 3]
-        recv_topk_slot = headers[:, 4]
+        ) = self._comm.finish_dispatch_moe(ticket._epoch)
         actual_counts = [int(value) for value in actual_counts_t.tolist()]
         aligned_counts = [int(value) for value in aligned_counts_t.tolist()]
-        num_actual = sum(actual_counts)
         result_handle = DLBHandle(
-            # The handle retains the routing tensors; callers that mutate
-            # them while the dispatch/combine pair is in flight violate the
-            # same lifetime contract as a CUDA input tensor.
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-            num_tokens=num_tokens,
+            topk_idx=ticket._topk_idx,
+            topk_weights=ticket._topk_weights,
+            num_tokens=ticket._x.shape[0],
             num_experts=self.num_experts,
-            expert_alignment=expert_alignment,
-            num_recv_tokens=num_actual,
+            expert_alignment=ticket._expert_alignment,
+            num_recv_tokens=sum(actual_counts),
             num_recv_tokens_per_expert_list=aligned_counts,
-            num_unaligned_recv_tokens_per_expert_list=[int(x) for x in actual_counts],
+            num_unaligned_recv_tokens_per_expert_list=actual_counts,
             recv_headers=headers,
-            recv_source_rank=recv_source_rank,
-            recv_source_token=recv_source_token,
-            recv_expert_idx=recv_expert_idx,
-            recv_topk_slot=recv_topk_slot,
+            recv_source_rank=headers[:, 1],
+            recv_source_token=headers[:, 2],
+            recv_expert_idx=headers[:, 3],
+            recv_topk_slot=headers[:, 4],
             recv_topk_weights=recv_weights,
             valid_mask=valid_mask,
             dispatch_group_output_indices=group_output_indices,
@@ -389,8 +414,10 @@ class DLBBuffer:
         )
         event = torch.cuda.Event()
         event.record(torch.cuda.current_stream())
-        return recv_x, recv_expert_idx, recv_weights, result_handle, EventOverlap(
-            event, (recv_x, recv_expert_idx, recv_weights)
+        ticket._finished = True
+        self._pending_dispatch = None
+        return recv_x, result_handle.recv_expert_idx, recv_weights, result_handle, EventOverlap(
+            event, (recv_x, result_handle.recv_expert_idx, recv_weights)
         )
 
     def combine(
@@ -403,6 +430,8 @@ class DLBBuffer:
     ) -> tuple[torch.Tensor, torch.Tensor, EventOverlap]:
         """Return expert outputs and reduce them into original token order."""
         self._check_open()
+        if self._pending_dispatch is not None:
+            raise RuntimeError("finish the outstanding DLB dispatch before calling combine")
         if x.shape != (handle.valid_mask.numel(), self.hidden):
             raise ValueError(
                 f"combine x must have shape [{handle.valid_mask.numel()}, {self.hidden}]"
@@ -424,7 +453,7 @@ class DLBBuffer:
                 raise ValueError("combine topk_weights must match the padded dispatched layout")
         weights = handle.recv_topk_weights if topk_weights is None else topk_weights
         weights = weights.to(torch.float32).contiguous()
-        epoch = self._next_epoch()
+        epoch = self._epoch + 1
         combined, combined_weights = self._comm.combine_moe(
             x,
             handle.recv_headers,
@@ -437,6 +466,7 @@ class DLBBuffer:
             self.num_topk,
             apply_router_weights,
         )
+        self._epoch = epoch
         self._round_id += 1
 
         event = torch.cuda.Event()
@@ -471,6 +501,8 @@ class DLBBuffer:
     def close(self) -> None:
         if self.closed:
             return
+        if self._pending_dispatch is not None:
+            raise RuntimeError("finish the outstanding DLB dispatch before closing the buffer")
         self._comm.close()
         self.closed = True
 

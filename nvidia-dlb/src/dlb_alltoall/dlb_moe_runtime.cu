@@ -15,6 +15,68 @@ constexpr std::uint32_t kMaxRailGpus = 8;
 constexpr std::uint32_t kMaxTopK = 8;
 constexpr std::uint64_t kDispatchPayloadOffset = 128;
 constexpr std::uint64_t kInvalidRecord = std::numeric_limits<std::uint64_t>::max();
+constexpr std::uint64_t kTmaAlignment = 32;
+constexpr std::uint64_t kMinTmaPayloadBytes = 1024;
+constexpr std::uint64_t kMaxTmaPayloadBytes = 16 * 1024;
+
+// Holds the shared-memory state used by one SM90 bulk-copy transaction.
+struct alignas(8) DlbTmaBarrier {
+    std::uint64_t value;
+};
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+__device__ __forceinline__ std::uint32_t shared_address(const void* pointer) {
+    return static_cast<std::uint32_t>(__cvta_generic_to_shared(pointer));
+}
+
+__device__ __forceinline__ void initialize_tma_barrier(DlbTmaBarrier* barrier) {
+    asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" ::
+                 "r"(shared_address(barrier)));
+    asm volatile("fence.mbarrier_init.release.cluster;" ::);
+}
+
+__device__ __forceinline__ void issue_tma_load(
+    void* shared_destination, const void* global_source,
+    DlbTmaBarrier* barrier, std::uint32_t bytes) {
+    asm volatile(
+        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes "
+        "[%0], [%1], %2, [%3];" ::
+        "r"(shared_address(shared_destination)), "l"(global_source),
+        "r"(bytes), "r"(shared_address(barrier)) : "memory");
+    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%1], %0;" ::
+                 "r"(bytes), "r"(shared_address(barrier)) : "memory");
+}
+
+__device__ __forceinline__ void wait_tma_load(
+    DlbTmaBarrier* barrier, std::uint32_t phase) {
+    asm volatile(
+        "{\n\t"
+        ".reg .pred ready;\n\t"
+        "DLB_TMA_WAIT:\n\t"
+        "mbarrier.try_wait.parity.shared::cta.b64 ready, [%0], %1, %2;\n\t"
+        "@ready bra DLB_TMA_DONE;\n\t"
+        "bra DLB_TMA_WAIT;\n\t"
+        "DLB_TMA_DONE:\n\t"
+        "}" ::
+        "r"(shared_address(barrier)), "r"(phase), "r"(0x989680));
+}
+
+__device__ __forceinline__ void issue_tma_store(
+    void* global_destination, const void* shared_source, std::uint32_t bytes) {
+    asm volatile(
+        "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;" ::
+        "l"(global_destination), "r"(shared_address(shared_source)),
+        "r"(bytes) : "memory");
+}
+
+__device__ __forceinline__ void commit_tma_stores() {
+    asm volatile("cp.async.bulk.commit_group;" ::);
+}
+
+__device__ __forceinline__ void wait_tma_stores() {
+    asm volatile("cp.async.bulk.wait_group 0;" ::: "memory");
+}
+#endif
 
 struct alignas(16) DlbRankDispatchHeader {
     std::int64_t epoch;
@@ -140,6 +202,8 @@ __global__ void build_dynamic_rail_plan_kernel(
         tile_total += source_loads[source];
     }
 
+    // Rotate remainder assignment so equally loaded Rails do not always favor
+    // the lowest IDs across repeated source-to-destination server transfers.
     const std::uint32_t first =
         (source_server * 17u + destination_server * 31u + round_id) %
         gpus_per_server;
@@ -157,6 +221,8 @@ __global__ void build_dynamic_rail_plan_kernel(
         }
     }
 
+    // Drain each overloaded default Rail into deficit Rails while preserving
+    // every record's logical destination-local-GPU index.
     std::uint32_t selected_rail = 0;
     for (std::uint32_t source = 0; source < gpus_per_server; ++source) {
         std::uint64_t remaining_surplus = surplus[source];
@@ -273,14 +339,35 @@ __global__ void pack_moe_direct_kernel(
     const std::uint64_t* flow_rail_counts,
     std::uint64_t* destination_cursors,
     std::uint8_t* const* rail_send_buffers,
-    std::uint8_t* const* repair_buffers) {
+    std::uint8_t* const* repair_buffers,
+    bool enable_tma) {
     const std::uint64_t token = blockIdx.x;
     if (token >= num_tokens) return;
 
     __shared__ std::uint8_t* record;
     __shared__ std::uint32_t destination_rank;
+    __shared__ bool record_uses_tma;
+    extern __shared__ __align__(32) std::uint8_t tma_storage[];
+    auto* const tma_barrier =
+        reinterpret_cast<DlbTmaBarrier*>(tma_storage + hidden_bytes);
     const std::uint64_t token_begin = token * num_topk;
     const std::uint32_t num_local_experts = num_experts / world_size;
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    bool tma_load_pending = false;
+    bool tma_store_issued = false;
+    // Load each token once and reuse its shared-memory payload for every
+    // rank-deduplicated destination record produced by this CTA.
+    if (enable_tma && threadIdx.x == 0) {
+        initialize_tma_barrier(tma_barrier);
+    }
+    __syncthreads();
+    if (enable_tma && threadIdx.x == 0) {
+        issue_tma_load(tma_storage, x + token * hidden_bytes, tma_barrier,
+                       static_cast<std::uint32_t>(hidden_bytes));
+        tma_load_pending = true;
+    }
+#endif
 
     // One block owns one token. It walks only the token's unique destination
     // ranks, avoiding the previous tokens*topk launch in which duplicate-rank
@@ -414,27 +501,53 @@ __global__ void pack_moe_direct_kernel(
                     header->weights[selection] = topk_weights[token_begin + slot];
                 }
             }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+            record_uses_tma =
+                enable_tma && record != nullptr &&
+                (reinterpret_cast<std::uintptr_t>(
+                     record + kDispatchPayloadOffset) &
+                 (kTmaAlignment - 1)) == 0;
+#else
+            record_uses_tma = false;
+#endif
         }
         __syncthreads();
 
         if (record != nullptr) {
             const std::uint8_t* source = x + token * hidden_bytes;
             std::uint8_t* payload = record + kDispatchPayloadOffset;
-            const std::uintptr_t alignment =
-                reinterpret_cast<std::uintptr_t>(source) |
-                reinterpret_cast<std::uintptr_t>(payload) | hidden_bytes;
-            if ((alignment & (alignof(uint4) - 1)) == 0) {
-                const auto* input = reinterpret_cast<const uint4*>(source);
-                auto* output = reinterpret_cast<uint4*>(payload);
-                const std::uint64_t vectors = hidden_bytes / sizeof(uint4);
-                for (std::uint64_t index = threadIdx.x; index < vectors;
-                     index += blockDim.x) {
-                    output[index] = input[index];
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+            if (record_uses_tma) {
+                if (threadIdx.x == 0) {
+                    if (tma_load_pending) {
+                        wait_tma_load(tma_barrier, 0);
+                        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+                        tma_load_pending = false;
+                    }
+                    issue_tma_store(payload, tma_storage,
+                                    static_cast<std::uint32_t>(hidden_bytes));
+                    commit_tma_stores();
+                    tma_store_issued = true;
                 }
-            } else {
-                for (std::uint64_t index = threadIdx.x; index < hidden_bytes;
-                     index += blockDim.x) {
-                    payload[index] = source[index];
+            } else
+#endif
+            {
+                const std::uintptr_t alignment =
+                    reinterpret_cast<std::uintptr_t>(source) |
+                    reinterpret_cast<std::uintptr_t>(payload) | hidden_bytes;
+                if ((alignment & (alignof(uint4) - 1)) == 0) {
+                    const auto* input = reinterpret_cast<const uint4*>(source);
+                    auto* output = reinterpret_cast<uint4*>(payload);
+                    const std::uint64_t vectors = hidden_bytes / sizeof(uint4);
+                    for (std::uint64_t index = threadIdx.x; index < vectors;
+                         index += blockDim.x) {
+                        output[index] = input[index];
+                    }
+                } else {
+                    for (std::uint64_t index = threadIdx.x; index < hidden_bytes;
+                         index += blockDim.x) {
+                        payload[index] = source[index];
+                    }
                 }
             }
             for (std::uint64_t index =
@@ -444,11 +557,23 @@ __global__ void pack_moe_direct_kernel(
             }
         }
         __syncthreads();
-        if (threadIdx.x == 0 && record != nullptr) {
+        if (threadIdx.x == 0 && record != nullptr && !record_uses_tma) {
             __threadfence_system();
         }
         __syncthreads();
     }
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    if (enable_tma && threadIdx.x == 0) {
+        if (tma_load_pending) {
+            wait_tma_load(tma_barrier, 0);
+        }
+        if (tma_store_issued) {
+            wait_tma_stores();
+            __threadfence_system();
+        }
+    }
+#endif
 }
 
 __device__ __forceinline__ float load_activation(
@@ -758,6 +883,11 @@ __global__ void count_received_experts_kernel(
     }
 }
 
+// Expands rank-deduplicated records into contiguous per-expert input buffers.
+//
+// A record can describe several expert selections on this destination rank.
+// The kernel reserves one output slot per selection, copies the shared hidden
+// payload into each slot, and records their common group for the combine path.
 __global__ void scatter_received_experts_kernel(
     const std::uint8_t* repair_records,
     std::uint64_t record_count,
@@ -981,13 +1111,22 @@ cudaError_t launch_dlb_pack_moe_direct(
     if (num_tokens > std::numeric_limits<unsigned>::max()) {
         return cudaErrorInvalidConfiguration;
     }
-    pack_moe_direct_kernel<<<static_cast<unsigned>(num_tokens), kPackThreads, 0, stream>>>(
+    const bool enable_tma =
+        hidden_bytes >= kMinTmaPayloadBytes &&
+        hidden_bytes <= kMaxTmaPayloadBytes &&
+        hidden_bytes % kTmaAlignment == 0 &&
+        record_bytes % kTmaAlignment == 0 &&
+        (reinterpret_cast<std::uintptr_t>(x) & (kTmaAlignment - 1)) == 0;
+    const std::size_t dynamic_shared_bytes =
+        enable_tma ? static_cast<std::size_t>(hidden_bytes) + kTmaAlignment : 0;
+    pack_moe_direct_kernel<<<static_cast<unsigned>(num_tokens), kPackThreads,
+                             dynamic_shared_bytes, stream>>>(
         static_cast<const std::uint8_t*>(x), num_tokens, hidden_bytes, topk_idx,
         topk_weights, num_topk, num_experts, world_size, server_count,
         gpus_per_server, source_server, source_local_rank, source_rank, epoch,
         record_bytes, rail_slot_bytes, repair_slot_bytes,
         repair_epoch_offset_bytes, flow_rail_counts, destination_cursors,
-        rail_send_buffers, repair_buffers);
+        rail_send_buffers, repair_buffers, enable_tma);
     return cudaGetLastError();
 }
 

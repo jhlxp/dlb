@@ -8,7 +8,7 @@
 
 ## 1. 三条运行时 stream
 
-runtime 内部创建三条 CUDA stream：
+runtime 内部创建三条 non-blocking CUDA stream：
 
 ```text
 stage stream      等待 producer 数据就绪，发布本机 stage epoch
@@ -16,13 +16,18 @@ transport stream  matching Rail 收齐本机 producer 后执行 NVSHMEM 发送
 repair stream     接收远端 arrivals、repair，并等待本机所有 producer 完成
 ```
 
-调用者自己的 PyTorch stream 不被替换。runtime 通过 CUDA event 建立依赖，最终再把 `repair_ready` event 接回调用者 stream。
+调用者自己的 PyTorch stream 不被替换。runtime 通过 CUDA event 建立依赖，最终再把 `repair_ready` event 接回调用者 stream。`post_dispatch()` 只负责入队；它不在 host 侧等待这三条 stream。
 
 ## 2. direct pack：从路由记录到通信 Buffer
 
 `pack_moe_direct_kernel` 直接写 selected Rail 的 NVSHMEM symmetric peer
 buffer，或同服务器真实目标 GPU 的 CUDA-IPC repair buffer。它读取 GPU planner
 生成的 `flow_rail_counts`，为每条 group record 选择已分配的 Rail slot。
+
+在 SM90 且 hidden payload 满足 32-byte 对齐和支持的尺寸范围时，kernel 先用 TMA
+把一个 token 的 hidden 异步载入 shared memory 一次，再将其 fan-out 到该 token 的
+多个唯一目标 Rank record。SM 在 TMA 搬运期间构造 header 和分配 slot；不满足条件时
+自动回退到向量化 copy。这里的 TMA 只优化本地 pack，不替代后续 NVSHMEM/RDMA transport。
 
 `stage_stream` 等待 caller stream 的 direct pack 完成，然后发布跨进程 stage epoch；[`dlb_nvlink_runtime.cu`](../src/dlb_alltoall/dlb_nvlink_runtime.cu) 提供 CUDA-IPC epoch 的 publish/wait kernels。
 
@@ -164,7 +169,7 @@ receiver: payload repair 完成后，credit = arrival_epoch + 1
 
 ## 10. pipeline slot 与 slot epoch
 
-默认 pipeline depth 为 2：
+默认 pipeline depth 为 2，slot 由每次**数据面 transport epoch** 的 `epoch % pipeline_depth` 决定：
 
 ```text
 epoch 1 -> slot 1, slot_epoch 1
@@ -173,7 +178,9 @@ epoch 3 -> slot 1, slot_epoch 2
 epoch 4 -> slot 0, slot_epoch 2
 ```
 
-slot 决定使用哪份 buffer；单调增长的 slot epoch 区分同一 slot 的不同生命周期，避免上一轮残留 signal 被当成本轮完成。
+dispatch 和 combine 都会递增这个 epoch；上表不能解释为“连续四个 dispatch”。slot 决定使用哪份 buffer；单调增长的 slot epoch 区分同一 slot 的不同生命周期，避免上一轮残留 signal 被当成本轮完成。
+
+底层 runtime 有多个 protocol slot，但当前 Python/C++ binding 仍强制一个 `DLBBuffer` 同时最多持有一个未完成的 `DLBDispatchTicket`。因此 pipeline depth 保护的是 dispatch/combine 的 buffer 复用和安全的跨 microbatch 重叠，不表示业务可以连续 post 两个 dispatch 而不先 finish 第一个。
 
 ## 11. 本机 completion signal
 
@@ -185,13 +192,17 @@ slot 决定使用哪份 buffer；单调增长的 slot epoch 区分同一 slot �
 
 `wait_dlb_nvshmem_rdma_epoch()` 本身不做 CPU `cudaStreamSynchronize()`，而是让调用者 stream 等待 runtime 的 `repair_ready` event，所以 GPU 计算依赖可以继续排在同一 stream 上。
 
-不过当前 [`dispatch_moe()`](../dlb_nvshmem_binding.cpp) 为了精确分配 PyTorch 输出 tensor，会把紧凑的 expert/rail 计数复制到 pinned host memory，并在这一小段执行一次 stream synchronize。
+[`post_dispatch_moe()`](../dlb_nvshmem_binding.cpp) 不执行 host wait；后续
+[`finish_dispatch_moe()`](../dlb_nvshmem_binding.cpp) 为了精确分配 PyTorch
+输出 tensor，会把紧凑的 expert/rail 计数复制到 pinned host memory，并在这一小段执行一次 stream synchronize。
+
+更精确地说，`finish_dispatch_moe()` 的 host synchronize 发生在 `count_received_experts_kernel` 之后、`scatter_received_experts_kernel` 之前：它保证 host 已经知道精确的 output shape，但 scatter 仍是异步 caller-stream 工作。Python 在 scatter 后记录 `EventOverlap`，业务应通过该 event 建立对 `recv_x` 的依赖。
 
 当前异步边界如下：
 
 - payload 调度、pack、通信、repair、scatter 都在 GPU；
 - runtime epoch 等待通过 CUDA event 表达；
-- 当前 dispatch 仍有一个“小计数回主机”的同步边界，不是完全 host-asynchronous。
+- 当前 finish 仍有一个“小计数回主机”的同步边界，不是完全 host-asynchronous。
 
 ## 13. 完整正确性链
 

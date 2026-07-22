@@ -118,9 +118,12 @@ buffer = DLBBuffer(
     num_comm_sms=24,
 )
 
-recv_x, recv_expert_idx, recv_weights, handle, event = buffer.dispatch(
-    x, topk_idx, topk_weights, expert_alignment=128,
-)
+ticket = buffer.post_dispatch(x, topk_idx, topk_weights, expert_alignment=128)
+
+# Run work that does not read this batch's recv_x here.
+run_independent_compute()
+
+recv_x, recv_expert_idx, recv_weights, handle, event = ticket.finish()
 event.current_stream_wait()
 
 expert_output = grouped_expert_gemm(
@@ -130,16 +133,23 @@ combined_x, combined_weights, event = buffer.combine(expert_output, handle)
 event.current_stream_wait()
 ```
 
+`post_dispatch` performs GPU route counting, server-local demand collection,
+Rail planning, direct packing, and transport launch without a host wait.
+`finish` waits for the posted epoch, repairs received records into the
+expert-major layout, and performs the small count readback needed for exact
+PyTorch output allocation.  A buffer accepts one outstanding ticket, so the
+application must finish it before the next dispatch or combine.
+
 The handle carries the original router tensors, per-expert aligned counts,
 source rank/token/top-k metadata, and the padding mask needed by `combine`.
 
 Python is only the model-facing API and test harness. The production
-`dispatch_moe` and `combine_moe` extension calls keep route counting,
-server-local demand collection, DLB planning, record packing, receive repair,
-expert grouping, and reverse token accumulation in C++/CUDA. No payload,
-expanded route, demand matrix, or action table crosses into Python. The small
-per-expert count vector is copied to the host once so PyTorch can allocate the
-exact aligned expert output shape.
+`post_dispatch_moe`, `finish_dispatch_moe`, and `combine_moe` extension calls
+keep route counting, server-local demand collection, DLB planning, record
+packing, receive repair, expert grouping, and reverse token accumulation in
+C++/CUDA. No payload, expanded route, demand matrix, or action table crosses
+into Python. The small per-expert count vector is copied to the host once so
+PyTorch can allocate the exact aligned expert output shape.
 
 `num_comm_sms` controls the fixed communication-CTA budget and must be a
 positive even number. The runtime creates `num_comm_sms / 2` Rail channels;
@@ -186,6 +196,23 @@ Each invocation creates `log/YYYYMMDD-HHMMSS-xxxx/` with:
 - `stdout.log`: complete output from all ranks;
 - `result.json`: correctness, timing, memory, and Rail traffic;
 - `status.txt`: pass/fail and exit code.
+
+## Split-phase overlap benchmark
+
+The following benchmark compares complete sequential MoE microbatches against
+the split-phase schedule that posts microbatch `n + 1` before evaluating the
+local expert MLP for microbatch `n`.  It validates each pipelined result both
+against the sequential result and a communication-free MoE reference.
+
+```bash
+DLB_PYTHON=/path/to/python-env/bin/python \
+  ./scripts/run_dlb_moe_overlap_benchmark.sh \
+  --warmup-steps 10 --steps 20
+```
+
+It reports P50/P90 end-to-end microbatch time, tokens per second, the expert
+kernel time, and the steady-state split-phase speedup.  Router computation and
+reference validation are deliberately outside the timed interval.
 
 To measure DLB itself without router, expert, or combine computation, run:
 

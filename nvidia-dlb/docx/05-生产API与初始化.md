@@ -23,14 +23,21 @@ estimated_runtime_bytes
 业务持有的 communicator/runtime 对象，主要方法：
 
 ```text
-dispatch(...)
+post_dispatch(...)
+DLBDispatchTicket.finish()
 combine(...)
 close()
 ```
 
-对象内部保存 C++ custom class communicator、rank/world 配置和生命周期状态。
+不存在 `DLBBuffer.dispatch()` 兼容接口。若业务不做 overlap，仍应显式写成 `ticket = post_dispatch(...); ticket.finish()`；这只是立即完成同一套 split-phase 数据面，不是第二套底层实现。
 
-### 1.3 `DLBHandle`
+对象内部保存 C++ custom class communicator、调用方声明的 rank/world/逻辑服务器配置和生命周期状态。
+
+### 1.3 `DLBDispatchTicket`
+
+`post_dispatch()` 返回的短生命周期对象。它持有本轮 `x/topk_idx/topk_weights`，防止 post 阶段已经入队的 GPU work 在 `finish()` 前看到被释放的输入。一个 `DLBBuffer` 只允许一个未 finish 的 ticket；重复 post、在 ticket 未 finish 时 combine，或 close 都会 fail-fast。
+
+### 1.4 `DLBHandle`
 
 一次 dispatch 的返回句柄，保存 combine 恢复原 token 顺序所需信息，例如：
 
@@ -42,9 +49,9 @@ recv_expert_idx / recv_topk_slot / recv_topk_weights
 expert counts 和 Rail traffic counts
 ```
 
-业务不应自行构造或修改 handle；它属于对应 `DLBBuffer` 和对应 dispatch。
+业务不应自行构造或修改 handle；它在语义上属于产生它的 `DLBBuffer` 和对应 dispatch。当前 `combine()` 只检查专家数、Top-K shape 与 CUDA tensor 形状，尚未在 handle 内保存并 fail-fast 校验 communicator identity 或 dispatch epoch；生产调用方不得跨 buffer、跨 rank 或跨批次混用 handle。
 
-### 1.4 `EventOverlap`
+### 1.5 `EventOverlap`
 
 包装 CUDA event，用于让调用方把后续 GPU 工作挂到通信完成依赖上。它表达 CUDA 执行依赖，不是 CPU 侧全局 barrier。
 
@@ -62,7 +69,8 @@ C++ 注册位于 [`dlb_nvshmem_binding.cpp`](../dlb_nvshmem_binding.cpp) 末尾�
 
 ```text
 torch.classes.dlb_classes.nvshmem_comm_t
-  .dispatch_moe(...)
+  .post_dispatch_moe(...)
+  .finish_dispatch_moe(...)
   .combine_moe(...)
   .close()
 ```
@@ -82,6 +90,8 @@ server_count = world_size / M
 source_server = rank / M
 local_rail = rank % M
 ```
+
+这是软件约定而不是硬件发现。`gpus_per_server=M` 同时决定 local NVSHMEM team、CUDA IPC peer table 和 DLB Rail 索引；部署层必须保证连续 `M` 个 process-group ranks 确实位于同一物理服务器，且 local rank 与 GPU/NIC Rail 的绑定符合约定。
 
 [`dlb_nvshmem_comm_t`](../dlb_nvshmem_binding.cpp) 用 unique ID 初始化 NVSHMEM，并通过 strided team split 为每台物理服务器建立只包含本机 `M` 个 ranks 的 local team。
 
@@ -182,7 +192,7 @@ slot_bytes   = align_up(slot_records * record_bytes, 16)
 - 生产跨服务器路径使用 `transport_backend="nvshmem"`；`"loopback"` 只用于显式
   数据面验证，不应被生产配置隐式选中。
 
-## 8. `dispatch()` 的输入契约
+## 8. `post_dispatch()` / `finish()` 的输入契约
 
 核心输入为：
 
@@ -194,6 +204,8 @@ num_experts  来自 DLBBuffer 初始化配置
 expert_alignment > 0
 ```
 
+`post_dispatch()` 还接受可选的 `handle=`。传入时必须省略 `topk_idx`，Python 会复用该 handle 保存的 `topk_idx`，并复用或覆盖其 `topk_weights`。这是**复用 router 决策**的便利接口，不会复用上次的 demand matrix、Rail plan、record offsets 或 transport slot；当前调用仍会重新执行 count、local fcollect、动态规划和 direct pack。
+
 当前设计假定专家均匀分布：
 
 ```text
@@ -201,7 +213,7 @@ num_local_experts = num_experts / world_size
 destination_rank  = expert_id / num_local_experts
 ```
 
-因此 `num_experts` 必须能被 `world_size` 整除，expert ID 必须在合法范围内。
+因此 `num_experts` 必须能被 `world_size` 整除。expert ID 的范围在 GPU route-count kernel 中统计，并在**当前 rank** 的 `finish()` 小型计数 D2H 边界 fail-fast；`post_dispatch()` 本身可以先返回，不能把它当作 expert-ID 已验证完成的同步检查点。该计数没有跨 rank 汇总，生产训练框架仍应负责把一个 rank 的异常升级为整组失败/退出。
 
 当前生产调用还应保证每个 Rank 的 `num_tokens > 0`，并避免形成完全为空的本地
 combine 输入。底层部分 launcher 会把空 tensor 的空指针或
@@ -209,7 +221,7 @@ combine 输入。底层部分 launcher 会把空 tensor 的空指针或
 
 ## 9. `combine()` 的输入契约
 
-业务先对 dispatch 输出的 local expert records 执行专家计算，再调用：
+业务先对 `ticket.finish()` 输出的 local expert records 执行专家计算，再调用：
 
 ```text
 combine(expert_output, handle)
@@ -228,9 +240,11 @@ topk_weight
 每个 `(source_rank, source_token, current_rank)` 只回传一条 hidden。source rank
 再累加不同 expert Ranks 的局部和，恢复原 token 顺序。
 
+`apply_router_weights=True` 是默认语义。设为 `False` 时，expert rank 内的局部和改为不乘 router weight，但返回的 `combined_weights` 仍从 record header 回填传给本次 `combine()` 的 weight，供上层自行处理。
+
 ## 10. 生命周期与 `close()`
 
-关闭 communicator 涉及 NVSHMEM team、对称内存和跨 rank 状态，是 collective 生命周期动作。业务应让所有 ranks 在不再有未完成 dispatch/combine 后显式调用 `close()`。
+关闭 communicator 涉及 NVSHMEM team、对称内存和跨 rank 状态，是 collective 生命周期动作。业务应让所有 ranks 在不再有未 finish 的 ticket、且不再依赖已提交 combine 输出后显式调用 `close()`。C++ close 会执行 device synchronize 后释放 runtime 资源，不能把它放入正常层间热路径。
 
 析构函数不偷偷执行可能阻塞的 collective finalize，避免 Python GC 时某个 rank 单独析构导致死锁。
 
@@ -249,9 +263,10 @@ buffer = DLBBuffer(
     num_comm_sms=24,
 )
 
-recv_x, recv_expert_idx, recv_weights, handle, event = buffer.dispatch(
-    x, topk_idx, topk_weights, expert_alignment=128
-)
+ticket = buffer.post_dispatch(x, topk_idx, topk_weights, expert_alignment=128)
+
+# 可以在这里执行不读取本批 recv_x 的独立计算。
+recv_x, recv_expert_idx, recv_weights, handle, event = ticket.finish()
 event.current_stream_wait()
 
 # counts 位于 handle，按 expert 分段执行本地计算
@@ -263,4 +278,6 @@ event.current_stream_wait()
 buffer.close()
 ```
 
-第 06 章按 `dispatch()` 调用链说明这些操作对应的 kernels。
+`finish()` 为精确 shape 会有一次小型 D2H 同步，但 scatter 仍异步排在 caller stream；因此 `event.current_stream_wait()` 仍是 expert kernel 读取 `recv_x` 前的正确依赖表达。
+
+第 06 章按 `post_dispatch() -> ticket.finish()` 调用链说明这些操作对应的 kernels。

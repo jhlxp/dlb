@@ -93,6 +93,12 @@ def run_local_experts(
     aligned_counts: list[int],
     actual_counts: list[int],
 ) -> torch.Tensor:
+    """Runs a correctness-only local MoE reference.
+
+    This intentionally invokes regular PyTorch matrix multiplications per
+    expert. Production integrations should replace it with a grouped or fused
+    expert-GEMM implementation while preserving the padded DLB layout.
+    """
     output = torch.zeros_like(recv_x)
     offset = 0
     for local_expert, (aligned, actual) in enumerate(zip(aligned_counts, actual_counts)):
@@ -289,9 +295,10 @@ def run(args: argparse.Namespace) -> None:
             f"DLB.dispatch.{args.routing_mode}.rank{rank}.step{step}"
         )
         try:
-            recv_x, _, _, handle, dispatch_event = buffer.dispatch(
+            dispatch_ticket = buffer.post_dispatch(
                 x, topk_idx, topk_weights, expert_alignment=args.expert_alignment
             )
+            recv_x, _, _, handle, dispatch_event = dispatch_ticket.finish()
             dispatch_event.synchronize()
         finally:
             torch.cuda.nvtx.range_pop()
@@ -492,6 +499,7 @@ def run(args: argparse.Namespace) -> None:
         "topology": {"ep_size": 8, "logical_servers": 2, "gpus_per_server": 4},
         "model": {
             "routing_mode": args.routing_mode,
+            "dispatch_mode": "split-phase",
             "transport_backend": args.transport_backend,
             "global_batch_size": args.global_batch_size,
             "sequence_length": args.sequence_length,
@@ -523,6 +531,7 @@ def run(args: argparse.Namespace) -> None:
             f"ffn_hidden={args.ffn_hidden}, topk={args.num_topk}"
         )
         print(f"routing mode: {args.routing_mode}")
+        print("dispatch mode: split-phase")
         print(f"transport backend: {args.transport_backend}")
         print(
             f"global batch={args.global_batch_size}, sequence={args.sequence_length}, "

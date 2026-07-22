@@ -5,10 +5,12 @@
 入口链：
 
 ```text
-DLBBuffer.dispatch()                         dlb.py
-  -> nvshmem_comm_t.dispatch_moe()           dlb_nvshmem_binding.cpp
+DLBBuffer.post_dispatch()                    dlb.py
+  -> nvshmem_comm_t.post_dispatch_moe()      dlb_nvshmem_binding.cpp
      -> prepare_moe_direct()
      -> launch_dlb_nvshmem_rdma()
+DLBDispatchTicket.finish()                   dlb.py
+  -> nvshmem_comm_t.finish_dispatch_moe()    dlb_nvshmem_binding.cpp
      -> wait_dlb_nvshmem_rdma_epoch()
      -> count received experts
      -> allocate exact PyTorch outputs
@@ -17,7 +19,7 @@ DLBBuffer.dispatch()                         dlb.py
 
 ## 1. Python 层：校验与所有权
 
-[`DLBBuffer.dispatch()`](../dlb.py) 检查 device、shape、dtype、contiguous、专家数和容量，然后调用 custom class。
+[`DLBBuffer.post_dispatch()`](../dlb.py) 检查 device、shape、dtype、contiguous、Top-K 和容量，然后调用 custom class。expert ID 的逐元素合法性由 GPU route-count kernel 统计，错误会在 `finish()` 读取小型 counter 时报告。`finish()` 只消费该 ticket 并物化 expert-major 输出。
 
 Python 不做：
 
@@ -29,9 +31,11 @@ Python 不做：
 
 返回后 Python 只把 C++ tensors 封装成 `DLBHandle/EventOverlap`。
 
+`post_dispatch_moe()` 将 prepare 与 transport 入队后立即返回。`finish_dispatch_moe()` 先把 caller stream 依赖到 repair-ready event，再在精确输出 shape 的计数边界执行一次 host synchronize；scatter 在该同步之后继续异步入队。故业务必须把返回的 `EventOverlap` 接到消费 `recv_x` 的 stream 上。
+
 ## 2. route count：从 top-k 得到需求
 
-[`prepare_moe_direct()`](../dlb_nvshmem_binding.cpp) 等待待复用 pipeline slot 可用，并清零 `local_demand_row`。
+[`prepare_moe_direct()`](../dlb_nvshmem_binding.cpp) 是 custom class 的内部 helper，由 `post_dispatch_moe()` 调用。它等待待复用 pipeline slot 可用，并清零 `symmetric_demand_row`。
 
 随后启动：
 
@@ -58,9 +62,9 @@ wire_record_count
 ```
 
 该 kernel 对越界 expert ID 执行 `atomicAdd(invalid_route_count, 1)`，不把错误
-route 计入 demand。binding 在已有的小型计数 D2H 边界一并读取该计数，
+route 计入 demand。binding 在已有的小型计数 D2H 边界一并读取**本 rank** 的该计数，
 若非零则通过 `TORCH_CHECK` 报告越界数量和合法区间。这避免了
-错误 route 被静默丢弃；业务仍应保证 `0 <= topk_idx < num_experts`。
+错误 route 被静默丢弃；但它不是跨 rank collective abort，业务/launcher 仍应把任一 rank 的异常作为整组失败处理，并保证 `0 <= topk_idx < num_experts`。
 
 ## 3. local fcollect：形成源服务器需求矩阵
 
@@ -100,11 +104,15 @@ rail_transfers
 block 在 Top-K 中遍历唯一 destination Rank，每个目标只写一条 record：
 
 ```text
-读取 token activation
+TMA 异步读取一次 token activation 到 shared memory（SM90 fast path）
   -> 收集该目标 Rank 上的 expert/slot/weight
   -> 写 128-byte grouped header
-  -> 向量化复制 hidden payload
+  -> 将同一 shared payload fan-out 到各唯一目标 Rank record
 ```
+
+TMA fast path 要求 hidden、record stride 和相关地址满足 32-byte 对齐，payload 大小为
+1–16 KiB；否则使用 `uint4`/scalar fallback。TMA load 与 header/slot 工作重叠，异步 stores
+在 pack kernel 返回前排空，所以现有 stage epoch、transport 和 credit 语义不变。
 
 远端 group record 根据 `flow_rail_counts` 选择 Rail，直接写对应 GPU 的
 symmetric Rail slot；同服务器 group record 直接写真实目标 GPU 的 repair slot。
@@ -136,7 +144,7 @@ record.destination_rank == local_rank
 expert_id 属于本 rank 的 local expert 范围
 ```
 
-合法 record 对本地 expert counter 做 atomic add。
+合法 record 的每个 expert selection 对本地 expert counter 做一次 atomic add。因此 `actual_counts[e]` 统计的是 expert-expanded rows，不是 rank-deduplicated group record 数；后者由单独的 `group_count` 统计。
 
 ## 8. Host 侧输出 shape 确定
 
@@ -148,7 +156,7 @@ PyTorch tensor 创建需要在 host 侧知道输出维度。当前 binding：
 4. 按真实 record 数创建输出 tensors；
 5. 把 offsets 上传 GPU。
 
-回传数据为几十或数百个整数，不包含 records 或 activation。该步骤产生一次 host 同步；最大容量预分配或 device-side shape 管理可消除此边界。
+回传数据为几十或数百个整数，不包含 records 或 activation。该步骤产生一次 host 同步；随后 scatter 仍是异步 CUDA work。最大容量预分配或 device-side shape 管理可消除此分配边界。
 
 ## 9. expert-aligned 输出布局
 
@@ -206,17 +214,19 @@ handle           counts、mask、headers、回程映射与 traffic 统计
 event            CUDA completion dependency
 ```
 
-本地 expert kernel 以 expert offsets/counts 作为输入，无需感知 Rail、source server 或 repair。
+本地 expert kernel 以 expert offsets/counts 作为输入，无需感知 Rail、source server 或 repair。它必须先等待 `event`，并仅消费每个 expert 的 `raw_count` 有效行；对齐补齐行由 `valid_mask` 标识为无效。
 
 ## 12. 关于“cached dispatch”
 
-`DLBHandle` 会缓存 combine 必需的路由 tensor/headers，但当前 C++ `dispatch_moe()` 每次仍重新执行：
+`DLBHandle` 会缓存 combine 必需的路由 tensor/headers，但每次新的 `post_dispatch_moe()` 仍重新执行：
 
 ```text
 route count -> local fcollect -> dynamic plan -> direct pack
 ```
 
 因此 handle 是 combine 所需的回程元数据，不是 dispatch layout cache。即使路由输入保持不变，当前实现仍会重新执行需求计数、服务器内收集、Rail 规划和 direct pack。
+
+Python `post_dispatch(..., handle=previous_handle)` 可以省去再次传入相同的 router tensor：它只取用 `previous_handle.topk_idx/topk_weights`，并为新输入重新创建 ticket 和最终 handle。它不是通信计划缓存，也不改变上述 GPU 数据面步骤。
 
 ## 13. 热路径执行位置
 

@@ -61,6 +61,7 @@ struct DlbCudaIpcTable {
 
 // One instance lives on every GPU rank. It owns the direct-pack DLB transport
 // buffers and GPU descriptor tables for that rank's logical source server.
+// It is a passive state container; launch functions drive all communication.
 struct DlbRuntime {
     DlbRuntimeConfig config;
     std::uint32_t server_count;
