@@ -1,0 +1,12 @@
+/simulation/build/
+/simulation/dlb/outputs/
+/nvidia-dlb/build*/
+/nvidia-dlb/libdlb_nvshmem.so
+/nvidia-dlb/__pycache__/
+/nvidia-dlb/benchmarks/__pycache__/
+/nvidia-dlb/tests/__pycache__/
+/nvidia-dlb/log/*
+!/nvidia-dlb/log/.gitkeep
+/nvidia-fast/build*/
+/nvidia-fast/libflash.so
+/nvidia-fast/__pycache__/
