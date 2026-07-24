@@ -1,0 +1,14 @@
+{
+  "cuda_visible_devices": "",
+  "hidden": 2048,
+  "topk": 8,
+  "warmup": 1,
+  "iterations": 3,
+  "dtype": "bf16",
+  "source_loads": [
+    5000,
+    6000,
+    7000,
+    8000
+  ]
+}

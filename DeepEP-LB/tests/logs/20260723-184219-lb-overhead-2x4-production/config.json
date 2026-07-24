@@ -1,0 +1,43 @@
+{
+  "topology": {
+    "ep_size": 8,
+    "logical_servers": 2,
+    "gpus_per_server": 4,
+    "rail_pairs": [
+      "0-4",
+      "1-5",
+      "2-6",
+      "3-7"
+    ]
+  },
+  "workload": {
+    "global_batch_size": 16,
+    "sequence_length": 2048,
+    "global_tokens": 32768,
+    "tokens_per_rank": 4096,
+    "hidden": 2048,
+    "num_experts": 256,
+    "topk": 8
+  },
+  "sampling": {
+    "warmup_per_trial": 20,
+    "iterations_per_trial": 100,
+    "trials": 5,
+    "reported_rank": "slowest Rank per iteration",
+    "data_plane_barriers_in_timing": false
+  },
+  "routing_modes": [
+    "skewed",
+    "balanced",
+    "extreme"
+  ],
+  "dtypes": [
+    "bfloat16",
+    "fp8"
+  ],
+  "cases": [
+    "lb_off",
+    "lb_cold",
+    "lb_cached"
+  ]
+}

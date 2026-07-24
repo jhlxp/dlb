@@ -67,6 +67,7 @@ def run(args: argparse.Namespace) -> None:
         num_topk=args.num_topk,
         dtype=torch.bfloat16,
         pipeline_depth=2,
+        transport_backend=args.transport_backend,
     )
 
     epoch = 1
@@ -137,6 +138,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument(
+        "--transport-backend",
+        choices=("nvshmem", "loopback"),
+        default="nvshmem",
+    )
     return parser.parse_args()
 
 

@@ -1,0 +1,186 @@
+{
+  "status": "passed",
+  "scope": "test-only CUDA-IPC/NVLink source staging; stops at the selected Rail send ring",
+  "topology": {
+    "logical_servers": 2,
+    "rails_per_server": 4,
+    "ep_size": 8
+  },
+  "workload": {
+    "dtype": "fp8",
+    "hidden": 2048,
+    "topk": 8,
+    "record_stride_bytes": 2192,
+    "source_rail_loads": [
+      5000,
+      6000,
+      7000,
+      8000
+    ],
+    "selected_rail_loads": [
+      6500,
+      6500,
+      6500,
+      6500
+    ]
+  },
+  "traffic": {
+    "moved_messages_per_server": 2000,
+    "moved_bytes_per_server": 4384000,
+    "moved_fraction": 0.07692307692307693
+  },
+  "latency": {
+    "compact_quota_isolated": {
+      "min_ms": 0.0163199994713068,
+      "p50_ms": 0.017503999173641205,
+      "p95_ms": 0.03488000109791756,
+      "max_ms": 0.03862399980425835,
+      "mean_ms": 0.0196255998685956
+    },
+    "lb_off_pack": {
+      "min_ms": 0.013151999562978745,
+      "p50_ms": 0.014047999866306782,
+      "p95_ms": 0.01532800029963255,
+      "max_ms": 0.016287999227643013,
+      "mean_ms": 0.014124800032004715
+    },
+    "lb_on_source_pack": {
+      "min_ms": 0.05363199859857559,
+      "p50_ms": 0.4471360146999359,
+      "p95_ms": 0.5125439763069153,
+      "max_ms": 0.52019202709198,
+      "mean_ms": 0.29135680552572013
+    },
+    "lb_on_stage_consume": {
+      "min_ms": 0.02393599972128868,
+      "p50_ms": 0.0480320006608963,
+      "p95_ms": 0.5030720233917236,
+      "max_ms": 0.5088319778442383,
+      "mean_ms": 0.23717920063063502
+    },
+    "lb_incremental_p50_ms": 0.48112001549452543,
+    "lb_incremental_p50_us": 481.12001549452543
+  },
+  "rank_results": [
+    {
+      "rank": 0,
+      "source_server": 0,
+      "source_rail": 0,
+      "off_messages": 5000,
+      "on_messages": 6500,
+      "direct_messages": 5000,
+      "moved_messages": 0,
+      "quota_row": [
+        5000,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "rank": 1,
+      "source_server": 0,
+      "source_rail": 1,
+      "off_messages": 6000,
+      "on_messages": 6500,
+      "direct_messages": 6000,
+      "moved_messages": 0,
+      "quota_row": [
+        0,
+        6000,
+        0,
+        0
+      ]
+    },
+    {
+      "rank": 2,
+      "source_server": 0,
+      "source_rail": 2,
+      "off_messages": 7000,
+      "on_messages": 6500,
+      "direct_messages": 6500,
+      "moved_messages": 500,
+      "quota_row": [
+        500,
+        0,
+        6500,
+        0
+      ]
+    },
+    {
+      "rank": 3,
+      "source_server": 0,
+      "source_rail": 3,
+      "off_messages": 8000,
+      "on_messages": 6500,
+      "direct_messages": 6500,
+      "moved_messages": 1500,
+      "quota_row": [
+        1000,
+        500,
+        0,
+        6500
+      ]
+    },
+    {
+      "rank": 4,
+      "source_server": 1,
+      "source_rail": 0,
+      "off_messages": 5000,
+      "on_messages": 6500,
+      "direct_messages": 5000,
+      "moved_messages": 0,
+      "quota_row": [
+        5000,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "rank": 5,
+      "source_server": 1,
+      "source_rail": 1,
+      "off_messages": 6000,
+      "on_messages": 6500,
+      "direct_messages": 6000,
+      "moved_messages": 0,
+      "quota_row": [
+        0,
+        6000,
+        0,
+        0
+      ]
+    },
+    {
+      "rank": 6,
+      "source_server": 1,
+      "source_rail": 2,
+      "off_messages": 7000,
+      "on_messages": 6500,
+      "direct_messages": 6500,
+      "moved_messages": 500,
+      "quota_row": [
+        500,
+        0,
+        6500,
+        0
+      ]
+    },
+    {
+      "rank": 7,
+      "source_server": 1,
+      "source_rail": 3,
+      "off_messages": 8000,
+      "on_messages": 6500,
+      "direct_messages": 6500,
+      "moved_messages": 1500,
+      "quota_row": [
+        1000,
+        500,
+        0,
+        6500
+      ]
+    }
+  ]
+}

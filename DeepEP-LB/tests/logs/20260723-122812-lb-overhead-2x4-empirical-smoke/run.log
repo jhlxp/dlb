@@ -1,0 +1,17 @@
+[benchmark] routing=empirical dtype=bfloat16 case=lb_off
+[progress] case=lb_off dtype=bfloat16 trial=1/1
+[benchmark] routing=empirical dtype=bfloat16 case=lb_cold
+[progress] case=lb_cold dtype=bfloat16 trial=1/1
+[benchmark] routing=empirical dtype=bfloat16 case=lb_cached
+[progress] case=lb_cached dtype=bfloat16 trial=1/1
+[benchmark] routing=empirical dtype=fp8 case=lb_off
+[progress] case=lb_off dtype=fp8 trial=1/1
+[benchmark] routing=empirical dtype=fp8 case=lb_cold
+[progress] case=lb_cold dtype=fp8 trial=1/1
+[benchmark] routing=empirical dtype=fp8 case=lb_cached
+[progress] case=lb_cached dtype=fp8 trial=1/1
+{
+  "status": "passed",
+  "summary": "tests/logs/20260723-122812-lb-overhead-2x4-empirical-smoke/summary.json",
+  "raw_samples": "tests/logs/20260723-122812-lb-overhead-2x4-empirical-smoke/raw_samples.json"
+}

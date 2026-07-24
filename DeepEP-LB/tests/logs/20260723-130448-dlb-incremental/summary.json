@@ -1,0 +1,103 @@
+{
+  "status": "passed",
+  "metric": "DLB planner plus source-pack ON/OFF delta only; Rail transfer, destination forwarding, and combine excluded",
+  "topology": {
+    "ep_size": 8,
+    "logical_servers": 2,
+    "rails_per_server": 4
+  },
+  "workload": {
+    "global_batch_size": 16,
+    "sequence_length": 4000,
+    "global_tokens": 64000,
+    "tokens_per_rank": 8000,
+    "hidden": 2048,
+    "num_experts": 256,
+    "topk": 8
+  },
+  "sampling": {
+    "warmup": 10,
+    "iterations": 50,
+    "reported_rank": "slowest Rank per iteration"
+  },
+  "rail_loads": {
+    "lb_off": {
+      "0->1": [
+        5000,
+        6000,
+        7000,
+        8000
+      ],
+      "1->0": [
+        5000,
+        6000,
+        7000,
+        8000
+      ]
+    },
+    "lb_on": {
+      "0->1": [
+        6500,
+        6500,
+        6500,
+        6500
+      ],
+      "1->0": [
+        6500,
+        6500,
+        6500,
+        6500
+      ]
+    }
+  },
+  "source_forwarded_messages": 4000,
+  "planner_cuda_ms_slowest_rank": 0.796607993543148,
+  "results": {
+    "bfloat16": {
+      "lb_off_pack_cuda_ms": {
+        "min": 0.03916800022125244,
+        "p50": 0.040511999279260635,
+        "p95": 0.0447327995672822,
+        "mean": 0.04087808005511761,
+        "max": 0.046720001846551895
+      },
+      "lb_on_pack_cuda_ms": {
+        "min": 0.04979199916124344,
+        "p50": 0.05278399959206581,
+        "p95": 0.05552319977432489,
+        "mean": 0.05270464017987251,
+        "max": 0.05628800019621849
+      },
+      "incremental_pack_p50_ms": 0.012272000312805176,
+      "incremental_pack_p50_us": 12.272000312805176,
+      "message_bytes": 4192,
+      "moved_messages": 4000,
+      "aggregate_staged_bytes": 16768000,
+      "total_incremental_p50_ms": 0.8088799938559532,
+      "total_incremental_p50_us": 808.8799938559532
+    },
+    "fp8": {
+      "lb_off_pack_cuda_ms": {
+        "min": 0.031199999153614044,
+        "p50": 0.03208000026643276,
+        "p95": 0.03503840025514364,
+        "mean": 0.03244607999920845,
+        "max": 0.03852799907326698
+      },
+      "lb_on_pack_cuda_ms": {
+        "min": 0.035232000052928925,
+        "p50": 0.036320000886917114,
+        "p95": 0.039784000441431995,
+        "mean": 0.03700928017497063,
+        "max": 0.04934399947524071
+      },
+      "incremental_pack_p50_ms": 0.004240000620484352,
+      "incremental_pack_p50_us": 4.240000620484352,
+      "message_bytes": 2208,
+      "moved_messages": 4000,
+      "aggregate_staged_bytes": 8832000,
+      "total_incremental_p50_ms": 0.8008479941636324,
+      "total_incremental_p50_us": 800.8479941636324
+    }
+  }
+}

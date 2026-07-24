@@ -1,0 +1,310 @@
+{
+  "status": "passed",
+  "topology": {
+    "ep_size": 8,
+    "logical_servers": 2,
+    "gpus_per_server": 4,
+    "rail_pairs": [
+      "0-4",
+      "1-5",
+      "2-6",
+      "3-7"
+    ],
+    "transport": "test-only CUDA IPC/P2P loopback"
+  },
+  "workload": {
+    "global_batch_size": 16,
+    "sequence_length": 2048,
+    "tokens_per_rank": 4096,
+    "hidden": 2048,
+    "num_experts": 256,
+    "topk": 8,
+    "routing_mode": "skewed"
+  },
+  "results": [
+    {
+      "mode": "v1_identity",
+      "dtype": "bfloat16",
+      "execution_stream": "default",
+      "timings": {
+        "reset_dispatch_ms": 0.2851039171218872,
+        "planner_loopback_coordinated_ms": 2.675093710422516,
+        "planner_cuda_kernels_ms": 1.8308159708976746,
+        "source_stage_ms": 0.3423132002353668,
+        "rail_transfer_ms": 0.8629569783806801,
+        "destination_forward_ms": 0.5252845585346222,
+        "reset_combine_ms": 0.3102049231529236,
+        "combine_stage_ms": 0.7159905508160591,
+        "combine_rail_transfer_ms": 0.5655679851770401,
+        "source_repair_ms": 0.3901524469256401,
+        "dispatch_data_plane_ms": 1.730554737150669,
+        "dispatch_total_ms": 1.730554737150669
+      },
+      "balance": {
+        "rail_loads": {
+          "0->0": [
+            0,
+            1024,
+            2048,
+            3072
+          ],
+          "0->1": [
+            4096,
+            3072,
+            2048,
+            1024
+          ],
+          "1->0": [
+            4096,
+            3072,
+            2048,
+            1024
+          ],
+          "1->1": [
+            0,
+            1024,
+            2048,
+            3072
+          ]
+        },
+        "direct_messages": 32768,
+        "source_forwarded_messages": 0,
+        "destination_forwarded_rank_copies": 98304,
+        "source_and_destination_forwarded_messages": 0
+      },
+      "aggregate_wire_messages": 32768,
+      "record_bytes": 4192,
+      "aggregate_wire_bytes": 137363456,
+      "workspace_bytes_per_rank": 52595072,
+      "aggregate_wire_gbps": 79.37538931947726,
+      "aggregate_wire_data_plane_gbps": 79.37538931947726
+    },
+    {
+      "mode": "dlb",
+      "dtype": "bfloat16",
+      "execution_stream": "default",
+      "timings": {
+        "reset_dispatch_ms": 0.36779697984457016,
+        "planner_loopback_coordinated_ms": 1.0848380625247955,
+        "planner_cuda_kernels_ms": 0.3632959984242916,
+        "source_stage_ms": 0.33249612897634506,
+        "rail_transfer_ms": 0.3282688558101654,
+        "destination_forward_ms": 0.42607076466083527,
+        "reset_combine_ms": 0.5774851888418198,
+        "combine_stage_ms": 0.6724875420331955,
+        "combine_rail_transfer_ms": 0.7243268191814423,
+        "source_repair_ms": 0.3955438733100891,
+        "dispatch_data_plane_ms": 1.0868357494473457,
+        "dispatch_total_ms": 2.1716738119721413
+      },
+      "balance": {
+        "rail_loads": {
+          "0->0": [
+            0,
+            1024,
+            2048,
+            3072
+          ],
+          "0->1": [
+            2560,
+            2560,
+            2560,
+            2560
+          ],
+          "1->0": [
+            2560,
+            2560,
+            2560,
+            2560
+          ],
+          "1->1": [
+            0,
+            1024,
+            2048,
+            3072
+          ]
+        },
+        "direct_messages": 28672,
+        "source_forwarded_messages": 4096,
+        "destination_forwarded_rank_copies": 98304,
+        "source_and_destination_forwarded_messages": 4096
+      },
+      "aggregate_wire_messages": 32768,
+      "record_bytes": 4192,
+      "aggregate_wire_bytes": 137363456,
+      "workspace_bytes_per_rank": 52595072,
+      "aggregate_wire_gbps": 63.252342613671544,
+      "aggregate_wire_data_plane_gbps": 126.38842260189647
+    },
+    {
+      "mode": "dlb_cached",
+      "dtype": "bfloat16",
+      "execution_stream": "default",
+      "timings": {
+        "reset_dispatch_ms": 0.47993287444114685,
+        "cached_plan_restore_ms": 0.27567241340875626,
+        "planner_loopback_coordinated_ms": 0.0,
+        "planner_cuda_kernels_ms": 0.0,
+        "source_stage_ms": 0.35669002681970596,
+        "rail_transfer_ms": 0.3938935697078705,
+        "destination_forward_ms": 1.1196741834282875,
+        "reset_combine_ms": 0.30608102679252625,
+        "combine_stage_ms": 0.6716707721352577,
+        "combine_rail_transfer_ms": 0.43940823525190353,
+        "source_repair_ms": 0.39356667548418045,
+        "dispatch_data_plane_ms": 1.870257779955864,
+        "dispatch_total_ms": 2.14593019336462
+      },
+      "balance": {
+        "rail_loads": {
+          "0->0": [
+            0,
+            1024,
+            2048,
+            3072
+          ],
+          "0->1": [
+            2560,
+            2560,
+            2560,
+            2560
+          ],
+          "1->0": [
+            2560,
+            2560,
+            2560,
+            2560
+          ],
+          "1->1": [
+            0,
+            1024,
+            2048,
+            3072
+          ]
+        },
+        "direct_messages": 28672,
+        "source_forwarded_messages": 4096,
+        "destination_forwarded_rank_copies": 98304,
+        "source_and_destination_forwarded_messages": 4096
+      },
+      "aggregate_wire_messages": 32768,
+      "record_bytes": 4192,
+      "aggregate_wire_bytes": 137363456,
+      "workspace_bytes_per_rank": 52595072,
+      "aggregate_wire_gbps": 64.01114837040751,
+      "aggregate_wire_data_plane_gbps": 73.44626899680193
+    },
+    {
+      "mode": "dlb_cached",
+      "dtype": "bfloat16",
+      "execution_stream": "non_default",
+      "timings": {
+        "reset_dispatch_ms": 0.34093670547008514,
+        "cached_plan_restore_ms": 0.2835150808095932,
+        "planner_loopback_coordinated_ms": 0.0,
+        "planner_cuda_kernels_ms": 0.0,
+        "source_stage_ms": 0.3320891410112381,
+        "rail_transfer_ms": 0.32897479832172394,
+        "destination_forward_ms": 0.437355600297451,
+        "reset_combine_ms": 0.574229285120964,
+        "combine_stage_ms": 0.6728321313858032,
+        "combine_rail_transfer_ms": 0.43460074812173843,
+        "source_repair_ms": 0.3874320536851883,
+        "dispatch_data_plane_ms": 1.098419539630413,
+        "dispatch_total_ms": 1.3819346204400063
+      },
+      "balance": {
+        "rail_loads": {
+          "0->0": [
+            0,
+            1024,
+            2048,
+            3072
+          ],
+          "0->1": [
+            2560,
+            2560,
+            2560,
+            2560
+          ],
+          "1->0": [
+            2560,
+            2560,
+            2560,
+            2560
+          ],
+          "1->1": [
+            0,
+            1024,
+            2048,
+            3072
+          ]
+        },
+        "direct_messages": 28672,
+        "source_forwarded_messages": 4096,
+        "destination_forwarded_rank_copies": 98304,
+        "source_and_destination_forwarded_messages": 4096
+      },
+      "aggregate_wire_messages": 32768,
+      "record_bytes": 4192,
+      "aggregate_wire_bytes": 137363456,
+      "workspace_bytes_per_rank": 52595072,
+      "aggregate_wire_gbps": 99.39938834173185,
+      "aggregate_wire_data_plane_gbps": 125.05554666864256
+    },
+    {
+      "mode": "dlb_cached",
+      "dtype": "fp8",
+      "execution_stream": "non_default",
+      "timings": {
+        "reset_dispatch_ms": 0.48658251762390137,
+        "cached_plan_restore_ms": 0.3092139959335327,
+        "planner_loopback_coordinated_ms": 0.0,
+        "planner_cuda_kernels_ms": 0.0,
+        "source_stage_ms": 0.3289198502898216,
+        "rail_transfer_ms": 0.3376593813300133,
+        "destination_forward_ms": 0.3947615623474121,
+        "dispatch_data_plane_ms": 1.061340793967247,
+        "dispatch_total_ms": 1.3705547899007797
+      },
+      "balance": {
+        "rail_loads": {
+          "0->0": [
+            0,
+            1024,
+            2048,
+            3072
+          ],
+          "0->1": [
+            2560,
+            2560,
+            2560,
+            2560
+          ],
+          "1->0": [
+            2560,
+            2560,
+            2560,
+            2560
+          ],
+          "1->1": [
+            0,
+            1024,
+            2048,
+            3072
+          ]
+        },
+        "direct_messages": 28672,
+        "source_forwarded_messages": 4096,
+        "destination_forwarded_rank_copies": 98304,
+        "source_and_destination_forwarded_messages": 4096
+      },
+      "aggregate_wire_messages": 32768,
+      "record_bytes": 2208,
+      "aggregate_wire_bytes": 72351744,
+      "workspace_bytes_per_rank": 52595072,
+      "aggregate_wire_gbps": 52.79011429031439,
+      "aggregate_wire_data_plane_gbps": 68.17013386393285
+    }
+  ]
+}

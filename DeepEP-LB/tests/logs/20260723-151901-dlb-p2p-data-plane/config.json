@@ -1,0 +1,23 @@
+{
+  "cuda_visible_devices": "",
+  "hidden": 2048,
+  "topk": 8,
+  "warmup": 5,
+  "iterations": 20,
+  "dtype": "both",
+  "source_loads": [
+    5000,
+    6000,
+    7000,
+    8000
+  ],
+  "source_sha256": "55b3ed9c3ee0ca802452a654e970464247d0a5e0088984c998b7233f1082fa3f",
+  "source_files": [
+    "csrc/deep_ep.cpp",
+    "csrc/kernels/internode.cu",
+    "csrc/kernels/rail_lb.cuh",
+    "csrc/kernels/rail_lb.cu",
+    "tests/csrc/dlb_loopback_test.cu",
+    "tests/test_dlb_loopback.py"
+  ]
+}

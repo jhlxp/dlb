@@ -1,0 +1,127 @@
+{
+  "status": "passed",
+  "metric": "LB ON from planner through source pack versus LB OFF source pack; Rail transfer, destination forwarding, and combine excluded",
+  "topology": {
+    "ep_size": 8,
+    "logical_servers": 2,
+    "rails_per_server": 4
+  },
+  "workload": {
+    "global_batch_size": 16,
+    "sequence_length": 4000,
+    "global_tokens": 64000,
+    "tokens_per_rank": 8000,
+    "hidden": 2048,
+    "num_experts": 256,
+    "topk": 8
+  },
+  "sampling": {
+    "warmup": 10,
+    "iterations": 50,
+    "reported_rank": "slowest Rank per iteration"
+  },
+  "rail_loads": {
+    "lb_off": {
+      "0->1": [
+        5000,
+        6000,
+        7000,
+        8000
+      ],
+      "1->0": [
+        5000,
+        6000,
+        7000,
+        8000
+      ]
+    },
+    "lb_on": {
+      "0->1": [
+        6500,
+        6500,
+        6500,
+        6500
+      ],
+      "1->0": [
+        6500,
+        6500,
+        6500,
+        6500
+      ]
+    }
+  },
+  "source_forwarded_messages": 4000,
+  "planner_cuda_ms": {
+    "min": 3.0329280626028776,
+    "p50": 3.1432640263810754,
+    "p95": 3.2275487892329693,
+    "mean": 3.118311679176986,
+    "max": 3.271488018333912
+  },
+  "save_plan_cuda_ms": {
+    "min": 0.016448000445961952,
+    "p50": 0.031215999275445938,
+    "p95": 0.04364319890737532,
+    "mean": 0.03535104040056467,
+    "max": 0.2896000146865845
+  },
+  "publish_virtual_count_cuda_ms": {
+    "min": 0.025696000084280968,
+    "p50": 0.028704000636935234,
+    "p95": 0.04355360120534895,
+    "mean": 0.032160000056028364,
+    "max": 0.12902399897575378
+  },
+  "results": {
+    "bfloat16": {
+      "lb_off_pack_cuda_ms": {
+        "min": 0.03923200070858002,
+        "p50": 0.040272001177072525,
+        "p95": 0.04600959978997707,
+        "mean": 0.04111296012997627,
+        "max": 0.05475199967622757
+      },
+      "lb_on_pack_cuda_ms": {
+        "min": 0.046112000942230225,
+        "p50": 0.04811200127005577,
+        "p95": 0.04996319841593504,
+        "mean": 0.048377600088715556,
+        "max": 0.05990400165319443
+      },
+      "incremental_pack_p50_ms": 0.007840000092983246,
+      "incremental_pack_p50_us": 7.840000092983246,
+      "message_bytes": 4192,
+      "moved_messages": 4000,
+      "aggregate_staged_bytes": 16768000,
+      "lb_off_total_p50_ms": 0.040272001177072525,
+      "lb_on_total_p50_ms": 3.2512960275635123,
+      "lb_incremental_p50_ms": 3.21102402638644,
+      "lb_incremental_p50_us": 3211.02402638644
+    },
+    "fp8": {
+      "lb_off_pack_cuda_ms": {
+        "min": 0.0318400003015995,
+        "p50": 0.03246400132775307,
+        "p95": 0.036886399984359726,
+        "mean": 0.03310079984366894,
+        "max": 0.0453759990632534
+      },
+      "lb_on_pack_cuda_ms": {
+        "min": 0.03385600075125694,
+        "p50": 0.03452799841761589,
+        "p95": 0.03757599983364343,
+        "mean": 0.03535615980625153,
+        "max": 0.05817599967122078
+      },
+      "incremental_pack_p50_ms": 0.0020639970898628235,
+      "incremental_pack_p50_us": 2.0639970898628235,
+      "message_bytes": 2208,
+      "moved_messages": 4000,
+      "aggregate_staged_bytes": 8832000,
+      "lb_off_total_p50_ms": 0.03246400132775307,
+      "lb_on_total_p50_ms": 3.2377120247110724,
+      "lb_incremental_p50_ms": 3.2052480233833194,
+      "lb_incremental_p50_us": 3205.2480233833194
+    }
+  }
+}

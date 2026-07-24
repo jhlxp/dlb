@@ -1,0 +1,41 @@
+[benchmark] routing=model dtype=bfloat16 case=lb_off
+[progress] case=lb_off dtype=bfloat16 trial=1/5
+[progress] case=lb_off dtype=bfloat16 trial=2/5
+[progress] case=lb_off dtype=bfloat16 trial=3/5
+[progress] case=lb_off dtype=bfloat16 trial=4/5
+[progress] case=lb_off dtype=bfloat16 trial=5/5
+[benchmark] routing=model dtype=bfloat16 case=lb_cold
+[progress] case=lb_cold dtype=bfloat16 trial=1/5
+[progress] case=lb_cold dtype=bfloat16 trial=2/5
+[progress] case=lb_cold dtype=bfloat16 trial=3/5
+[progress] case=lb_cold dtype=bfloat16 trial=4/5
+[progress] case=lb_cold dtype=bfloat16 trial=5/5
+[benchmark] routing=model dtype=bfloat16 case=lb_cached
+[progress] case=lb_cached dtype=bfloat16 trial=1/5
+[progress] case=lb_cached dtype=bfloat16 trial=2/5
+[progress] case=lb_cached dtype=bfloat16 trial=3/5
+[progress] case=lb_cached dtype=bfloat16 trial=4/5
+[progress] case=lb_cached dtype=bfloat16 trial=5/5
+[benchmark] routing=model dtype=fp8 case=lb_off
+[progress] case=lb_off dtype=fp8 trial=1/5
+[progress] case=lb_off dtype=fp8 trial=2/5
+[progress] case=lb_off dtype=fp8 trial=3/5
+[progress] case=lb_off dtype=fp8 trial=4/5
+[progress] case=lb_off dtype=fp8 trial=5/5
+[benchmark] routing=model dtype=fp8 case=lb_cold
+[progress] case=lb_cold dtype=fp8 trial=1/5
+[progress] case=lb_cold dtype=fp8 trial=2/5
+[progress] case=lb_cold dtype=fp8 trial=3/5
+[progress] case=lb_cold dtype=fp8 trial=4/5
+[progress] case=lb_cold dtype=fp8 trial=5/5
+[benchmark] routing=model dtype=fp8 case=lb_cached
+[progress] case=lb_cached dtype=fp8 trial=1/5
+[progress] case=lb_cached dtype=fp8 trial=2/5
+[progress] case=lb_cached dtype=fp8 trial=3/5
+[progress] case=lb_cached dtype=fp8 trial=4/5
+[progress] case=lb_cached dtype=fp8 trial=5/5
+{
+  "status": "passed",
+  "summary": "tests/logs/20260723-121553-lb-overhead-2x4-model-production-final/summary.json",
+  "raw_samples": "tests/logs/20260723-121553-lb-overhead-2x4-model-production-final/raw_samples.json"
+}
