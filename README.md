@@ -33,3 +33,18 @@ logical-demand rows of shape `M x (S*M)`:
    update this plan concurrently with every other server.
 
 DLB therefore neither collects a global `S x S` server matrix nor performs a global decomposition. It trades a globally coordinated schedule for local Rail balancing plus destination-side repair.
+
+## License
+
+Original DLB code in this repository is licensed under the MIT License; see the
+root `LICENSE` file. The following directories retain their own licenses and
+copyright notices:
+
+- `DeepEP-LB/` is derived from DeepEP and remains licensed under the DeepSeek
+  MIT License in `DeepEP-LB/LICENSE`.
+- `nvidia-fast/` is separately licensed under the MangoBoost Academic &
+  Non-Commercial License in `nvidia-fast/LICENSE`. Its third-party attributions
+  are listed in `nvidia-fast/THIRD_PARTY_NOTICES.md`.
+
+Files that carry their own license or copyright notice remain subject to those
+terms.
