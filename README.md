@@ -2,14 +2,17 @@
 
 DLB is an algorithm for source-server-local scheduling on Rail-based GPU clusters. Its goal is to balance each server's outgoing all-to-all traffic without requiring a cluster-wide demand matrix or a global communication schedule.
 
-The DLB algorithm utilizes a conclusion derived from RailS: under the Rail architecture, if each server transmits traffic in a perfectly load-balanced manner, then the aggregate traffic received by the servers is also perfectly load-balanced.
+The DLB algorithm utilizes a conclusion derived from RailS: under the Rail-optimized, if each server transmits traffic in a perfectly load-balanced manner, then the aggregate traffic received by the servers is also perfectly load-balanced.
+
+`DeepEP-LB/` provides a DeepEP V1 implementation of DLB for high-throughput internode dispatch. It preserves DeepEP's logical token-to-expert and dispatch/combine semantics while integrating source-Rail selection, token forwarding, and destination-side repair into the existing CUDA/NVSHMEM data plane. DLB can be enabled through the `use_lb` option, leaving the original DeepEP V1 path available when load balancing is disabled.
 
 ## Repository Layout
 
 - `simulation/dlb/`: DLB reference scheduler and evaluation benchmark. Its CSV and figures are written to `simulation/dlb/outputs/`.
+- `DeepEP-LB/`: DeepEP V1 with an optional, CUDA-implemented DLB path for high-throughput internode dispatch.
+- `DeepEP-LB/csrc/kernels/rail_lb.cu`: standalone GPU implementation of DLB planning, quota materialization, and cached-plan activation.
 - `nvidia-dlb/`: standalone DLB CUDA/NVSHMEM runtime, Python API, tests, and logs.
 - `nvidia-dlb/src/dlb_alltoall/`: DLB source-local planning and GPU communication runtime.
-- `nvidia-fast/`: isolated FAST comparison implementation and its own build.
 
 ## DLB Design
 
