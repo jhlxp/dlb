@@ -48,6 +48,15 @@ public:
         int num_ring_messages,
         int epoch);
 
+    void clear_post_forward_counter();
+
+    void seed_receive_ring(
+        const torch::Tensor& records,
+        const torch::Tensor& destination_rails,
+        int num_messages);
+
+    void post_forward(int num_ring_messages);
+
     std::vector<torch::Tensor> materialize_ring(int count);
 
     std::vector<torch::Tensor> materialize_stage(int count);

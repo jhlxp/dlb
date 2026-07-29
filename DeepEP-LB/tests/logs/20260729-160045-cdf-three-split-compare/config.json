@@ -1,0 +1,9 @@
+{
+  "hidden": 2048,
+  "topk": 8,
+  "warmup": 1,
+  "iterations": 1,
+  "seed": 20260729,
+  "distribution_path": "/home/chen/workspace/infra/code/DeepEP-MCRB/tests/data/empirical_pooled_distribution.csv",
+  "mcrb_first": false
+}

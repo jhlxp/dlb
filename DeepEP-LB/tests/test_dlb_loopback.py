@@ -167,6 +167,7 @@ def summarize(values: list[float]) -> dict[str, float]:
         "min_ms": min(values),
         "p50_ms": percentile(values, 0.50),
         "p95_ms": percentile(values, 0.95),
+        "p99_ms": percentile(values, 0.99),
         "max_ms": max(values),
         "mean_ms": sum(values) / len(values),
     }

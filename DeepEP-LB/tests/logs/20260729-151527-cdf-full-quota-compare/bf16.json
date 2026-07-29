@@ -1,0 +1,96 @@
+{
+  "status": "passed",
+  "case": "empirical_cdf_hotspot",
+  "scope": "2x4 CUDA-IPC/NVLink full-quota source staging and reverse-repair stages; no RDMA/HCA and no expert GEMM",
+  "source_sha256": "6732fca56bb2f82e40e98ffc653ea8c288b1c16928c5f49ea2e42f76a9900f83",
+  "workload": {
+    "dtype": "bf16",
+    "hidden": 2048,
+    "topk": 8,
+    "record_stride_bytes": 4176,
+    "source_rail_loads": [
+      5000,
+      6000,
+      7000,
+      8000
+    ],
+    "cdf_destination_rail_hits": [
+      7202,
+      3406,
+      4802,
+      10590
+    ]
+  },
+  "full_quota": {
+    "source_by_selected_rows": [
+      [
+        5000,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        6000,
+        0,
+        0
+      ],
+      [
+        500,
+        0,
+        6500,
+        0
+      ],
+      [
+        1000,
+        500,
+        0,
+        6500
+      ]
+    ],
+    "selected_rail_loads": [
+      6500,
+      6500,
+      6500,
+      6500
+    ],
+    "selected_imbalance": 0,
+    "moved_messages": 2000,
+    "moved_fraction": 0.07692307692307693
+  },
+  "latency": {
+    "deepep_raw_dispatch_pack": {
+      "min_ms": 0.22972799837589264,
+      "p50_ms": 0.2319680005311966,
+      "p95_ms": 0.2327679991722107,
+      "max_ms": 0.2327679991722107,
+      "mean_ms": 0.2315879985690117
+    },
+    "deepep_raw_combine_repair": {
+      "min_ms": 0.5214400291442871,
+      "p50_ms": 0.5236480236053467,
+      "p95_ms": 0.5255039930343628,
+      "max_ms": 0.5255039930343628,
+      "mean_ms": 0.5233200043439865
+    },
+    "deepep_raw_measured_total_p50_ms": 0.7556160241365433,
+    "deepep_full_quota_dispatch_pack": {
+      "min_ms": 0.26815998554229736,
+      "p50_ms": 0.2715519964694977,
+      "p95_ms": 0.27715200185775757,
+      "max_ms": 0.27715200185775757,
+      "mean_ms": 0.27125199884176254
+    },
+    "deepep_full_quota_combine_repair": {
+      "min_ms": 0.4641279876232147,
+      "p50_ms": 0.47119998931884766,
+      "p95_ms": 0.47465598583221436,
+      "max_ms": 0.47465598583221436,
+      "mean_ms": 0.47090399637818336
+    },
+    "deepep_full_quota_measured_total_p50_ms": 0.7427519857883453,
+    "full_quota_minus_raw_dispatch_p50_us": 39.583995938301086,
+    "full_quota_minus_raw_combine_p50_us": -52.44803428649902,
+    "full_quota_minus_raw_total_p50_us": -12.864038348197937
+  }
+}

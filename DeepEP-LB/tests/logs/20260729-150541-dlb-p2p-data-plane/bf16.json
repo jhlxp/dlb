@@ -1,0 +1,221 @@
+{
+  "status": "passed",
+  "source_sha256": "6732fca56bb2f82e40e98ffc653ea8c288b1c16928c5f49ea2e42f76a9900f83",
+  "scope": "test-only CUDA-IPC/NVLink source staging and moved-token reverse repair around an omitted network boundary",
+  "topology": {
+    "logical_servers": 2,
+    "rails_per_server": 4,
+    "ep_size": 8
+  },
+  "workload": {
+    "dtype": "bf16",
+    "hidden": 2048,
+    "topk": 8,
+    "record_stride_bytes": 4176,
+    "source_rail_loads": [
+      5000,
+      6000,
+      7000,
+      8000
+    ],
+    "selected_rail_loads": [
+      6500,
+      6500,
+      6500,
+      6500
+    ]
+  },
+  "traffic": {
+    "moved_messages_per_server": 2000,
+    "moved_bytes_per_server": 8352000,
+    "moved_fraction": 0.07692307692307693
+  },
+  "correctness": {
+    "token_conservation": "passed",
+    "token_identity": "passed",
+    "payload_bytes": "passed",
+    "direct_path": "passed",
+    "moved_path": "passed",
+    "reverse_repair": "passed",
+    "cached_schedule_reuse": "passed",
+    "multi_epoch": "passed"
+  },
+  "latency": {
+    "compact_quota_isolated": {
+      "min_ms": 0.02860799990594387,
+      "p50_ms": 0.031647998839616776,
+      "p95_ms": 0.08352000266313553,
+      "max_ms": 0.09193599969148636,
+      "mean_ms": 0.04025759994983673
+    },
+    "lb_off_dispatch_pack": {
+      "min_ms": 0.22703999280929565,
+      "p50_ms": 0.23001599311828613,
+      "p95_ms": 0.23267200589179993,
+      "max_ms": 0.23267200589179993,
+      "mean_ms": 0.2298768013715744
+    },
+    "balanced_local_pack_control": {
+      "min_ms": 0.1921599954366684,
+      "p50_ms": 0.19366399943828583,
+      "p95_ms": 0.1960960030555725,
+      "max_ms": 0.19648000597953796,
+      "mean_ms": 0.1937280021607876
+    },
+    "lb_on_fused_dispatch_pack": {
+      "min_ms": 0.26790401339530945,
+      "p50_ms": 0.28204798698425293,
+      "p95_ms": 0.29734399914741516,
+      "max_ms": 0.3054719865322113,
+      "mean_ms": 0.28305759876966474
+    },
+    "on_minus_off_dispatch_p50_us": 52.0319938659668,
+    "rail_patch_over_balanced_control_p50_us": 88.3839875459671,
+    "lb_off_combine": {
+      "min_ms": 0.5189440250396729,
+      "p50_ms": 0.5212479829788208,
+      "p95_ms": 0.5256639719009399,
+      "max_ms": 0.5314559936523438,
+      "mean_ms": 0.5221247941255569
+    },
+    "lb_on_combine_with_reverse_repair": {
+      "min_ms": 0.4676479995250702,
+      "p50_ms": 0.47094398736953735,
+      "p95_ms": 0.47488000988960266,
+      "max_ms": 0.5190399885177612,
+      "mean_ms": 0.47307360023260114
+    },
+    "combine_incremental_p50_us": -50.30399560928345,
+    "total_lb_incremental_p50_us": 1.7279982566833496
+  },
+  "throughput_gbps": {
+    "logical_payload_bytes_per_server": 108576000,
+    "lb_off_dispatch_pack": 472.03674200239027,
+    "lb_on_fused_dispatch_pack": 384.9557699770498,
+    "lb_off_combine": 208.30008661042942,
+    "lb_on_combine_with_reverse_repair": 230.54971060667404,
+    "moved_payload_over_rail_patch_delta": 94.49675480704305
+  },
+  "rank_results": [
+    {
+      "rank": 0,
+      "source_server": 0,
+      "source_rail": 0,
+      "off_messages": 5000,
+      "on_messages": 6500,
+      "direct_messages": 5000,
+      "moved_messages": 0,
+      "quota_row": [
+        5000,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "rank": 1,
+      "source_server": 0,
+      "source_rail": 1,
+      "off_messages": 6000,
+      "on_messages": 6500,
+      "direct_messages": 6000,
+      "moved_messages": 0,
+      "quota_row": [
+        0,
+        6000,
+        0,
+        0
+      ]
+    },
+    {
+      "rank": 2,
+      "source_server": 0,
+      "source_rail": 2,
+      "off_messages": 7000,
+      "on_messages": 6500,
+      "direct_messages": 6500,
+      "moved_messages": 500,
+      "quota_row": [
+        500,
+        0,
+        6500,
+        0
+      ]
+    },
+    {
+      "rank": 3,
+      "source_server": 0,
+      "source_rail": 3,
+      "off_messages": 8000,
+      "on_messages": 6500,
+      "direct_messages": 6500,
+      "moved_messages": 1500,
+      "quota_row": [
+        1000,
+        500,
+        0,
+        6500
+      ]
+    },
+    {
+      "rank": 4,
+      "source_server": 1,
+      "source_rail": 0,
+      "off_messages": 5000,
+      "on_messages": 6500,
+      "direct_messages": 5000,
+      "moved_messages": 0,
+      "quota_row": [
+        5000,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "rank": 5,
+      "source_server": 1,
+      "source_rail": 1,
+      "off_messages": 6000,
+      "on_messages": 6500,
+      "direct_messages": 6000,
+      "moved_messages": 0,
+      "quota_row": [
+        0,
+        6000,
+        0,
+        0
+      ]
+    },
+    {
+      "rank": 6,
+      "source_server": 1,
+      "source_rail": 2,
+      "off_messages": 7000,
+      "on_messages": 6500,
+      "direct_messages": 6500,
+      "moved_messages": 500,
+      "quota_row": [
+        500,
+        0,
+        6500,
+        0
+      ]
+    },
+    {
+      "rank": 7,
+      "source_server": 1,
+      "source_rail": 3,
+      "off_messages": 8000,
+      "on_messages": 6500,
+      "direct_messages": 6500,
+      "moved_messages": 1500,
+      "quota_row": [
+        1000,
+        500,
+        0,
+        6500
+      ]
+    }
+  ]
+}

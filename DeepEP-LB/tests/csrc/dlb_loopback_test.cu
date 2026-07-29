@@ -40,6 +40,14 @@ void check_cuda_quota_rows(const torch::Tensor& tensor, int device) {
     TORCH_CHECK(tensor.size(1) == kRails);
 }
 
+void check_cuda_destination_rails(const torch::Tensor& tensor, int device) {
+    TORCH_CHECK(tensor.is_cuda());
+    TORCH_CHECK(tensor.is_contiguous());
+    TORCH_CHECK(tensor.get_device() == device);
+    TORCH_CHECK(tensor.scalar_type() == torch::kInt32);
+    TORCH_CHECK(tensor.dim() == 1);
+}
+
 __device__ __forceinline__ void copy_record(
     uint8_t* destination,
     const uint8_t* source,
@@ -249,6 +257,84 @@ __global__ void dispatch_on_kernel(
         );
         if (lane == 0)
             ring_ids[ring_slot] = staging_ids[stage_slot];
+    }
+}
+
+__global__ void seed_receive_ring_kernel(
+    const uint8_t* records,
+    const int* destination_rails,
+    uint8_t* local_buffer,
+    size_t ring_ids_offset,
+    size_t ring_payload_offset,
+    size_t record_stride,
+    int record_bytes,
+    int num_messages) {
+    const int warp = static_cast<int>(threadIdx.x) / 32;
+    const int lane = static_cast<int>(threadIdx.x) % 32;
+    const int first_message =
+        static_cast<int>(blockIdx.x) * kWarpsPerBlock + warp;
+    const int message_stride =
+        static_cast<int>(gridDim.x) * kWarpsPerBlock;
+    auto ring_ids = reinterpret_cast<int64_t*>(
+        local_buffer + ring_ids_offset
+    );
+    for (int message = first_message;
+         message < num_messages;
+         message += message_stride) {
+        copy_record(
+            local_buffer + ring_payload_offset +
+                static_cast<size_t>(message) * record_stride,
+            records + static_cast<size_t>(message) * record_stride,
+            record_bytes,
+            lane
+        );
+        if (lane == 0)
+            ring_ids[message] = destination_rails[message];
+    }
+}
+
+__global__ void post_forward_kernel(
+    void** local_buffers,
+    size_t sync_offset,
+    size_t staging_payload_offset,
+    size_t ring_ids_offset,
+    size_t ring_payload_offset,
+    size_t record_stride,
+    int record_bytes,
+    int source_rail,
+    int num_ring_messages) {
+    const int warp = static_cast<int>(threadIdx.x) / 32;
+    const int lane = static_cast<int>(threadIdx.x) % 32;
+    const int first_message =
+        static_cast<int>(blockIdx.x) * kWarpsPerBlock + warp;
+    const int message_stride =
+        static_cast<int>(gridDim.x) * kWarpsPerBlock;
+    auto local_buffer =
+        static_cast<uint8_t*>(local_buffers[source_rail]);
+    auto ring_ids = reinterpret_cast<const int64_t*>(
+        local_buffer + ring_ids_offset
+    );
+    for (int message = first_message;
+         message < num_ring_messages;
+         message += message_stride) {
+        const int destination_rail = static_cast<int>(ring_ids[message]);
+        auto destination_buffer =
+            static_cast<uint8_t*>(local_buffers[destination_rail]);
+        auto counter = reinterpret_cast<int*>(
+            destination_buffer + sync_offset
+        );
+        int slot = 0;
+        if (lane == 0)
+            slot = atomicAdd(counter, 1);
+        slot = __shfl_sync(0xffffffff, slot, 0);
+        copy_record(
+            destination_buffer + staging_payload_offset +
+                static_cast<size_t>(slot) * record_stride,
+            local_buffer + ring_payload_offset +
+                static_cast<size_t>(message) * record_stride,
+            record_bytes,
+            lane
+        );
     }
 }
 
@@ -649,6 +735,78 @@ void DlbP2PLoopbackRuntime::combine(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+void DlbP2PLoopbackRuntime::clear_post_forward_counter() {
+    TORCH_CHECK(synced_);
+    set_device();
+    C10_CUDA_CHECK(cudaMemsetAsync(
+        local_buffer_ + sync_offset_,
+        0,
+        sizeof(int),
+        at::cuda::getCurrentCUDAStream(device_id_)
+    ));
+}
+
+void DlbP2PLoopbackRuntime::seed_receive_ring(
+    const torch::Tensor& records,
+    const torch::Tensor& destination_rails,
+    int num_messages) {
+    TORCH_CHECK(synced_);
+    TORCH_CHECK(records.is_cuda() and records.is_contiguous());
+    TORCH_CHECK(records.get_device() == device_id_);
+    TORCH_CHECK(records.scalar_type() == torch::kUInt8);
+    TORCH_CHECK(records.dim() == 2);
+    TORCH_CHECK(records.size(0) <= max_tokens_);
+    TORCH_CHECK(
+        records.size(1) == static_cast<int64_t>(record_stride_)
+    );
+    check_cuda_destination_rails(destination_rails, device_id_);
+    TORCH_CHECK(destination_rails.size(0) >= num_messages);
+    TORCH_CHECK(0 <= num_messages and num_messages <= records.size(0));
+    if (num_messages == 0)
+        return;
+    seed_receive_ring_kernel<<<
+        kPersistentBlocks,
+        kThreads,
+        0,
+        at::cuda::getCurrentCUDAStream(device_id_)
+    >>>(
+        records.data_ptr<uint8_t>(),
+        destination_rails.data_ptr<int>(),
+        local_buffer_,
+        ring_ids_offset_,
+        ring_payload_offset_,
+        record_stride_,
+        static_cast<int>(record_stride_),
+        num_messages
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void DlbP2PLoopbackRuntime::post_forward(int num_ring_messages) {
+    TORCH_CHECK(synced_);
+    TORCH_CHECK(0 <= num_ring_messages and
+                num_ring_messages <= queue_capacity_);
+    if (num_ring_messages == 0)
+        return;
+    post_forward_kernel<<<
+        kPersistentBlocks,
+        kThreads,
+        0,
+        at::cuda::getCurrentCUDAStream(device_id_)
+    >>>(
+        local_ptrs_device_,
+        sync_offset_,
+        staging_payload_offset_,
+        ring_ids_offset_,
+        ring_payload_offset_,
+        record_stride_,
+        static_cast<int>(record_stride_),
+        source_rail_,
+        num_ring_messages
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 std::vector<torch::Tensor>
 DlbP2PLoopbackRuntime::materialize_ring(int count) {
     TORCH_CHECK(synced_);
@@ -753,6 +911,15 @@ void bind_dlb_p2p_loopback(pybind11::module_& module) {
         .def("pack_off", &DlbP2PLoopbackRuntime::pack_off)
         .def("dispatch_on", &DlbP2PLoopbackRuntime::dispatch_on)
         .def("combine", &DlbP2PLoopbackRuntime::combine)
+        .def(
+            "clear_post_forward_counter",
+            &DlbP2PLoopbackRuntime::clear_post_forward_counter
+        )
+        .def(
+            "seed_receive_ring",
+            &DlbP2PLoopbackRuntime::seed_receive_ring
+        )
+        .def("post_forward", &DlbP2PLoopbackRuntime::post_forward)
         .def(
             "materialize_ring",
             &DlbP2PLoopbackRuntime::materialize_ring
